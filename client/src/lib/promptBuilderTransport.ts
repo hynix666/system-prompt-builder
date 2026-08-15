@@ -166,20 +166,61 @@ export async function callLocalOpenAICompatible(
     },
     signal,
   );
-  const data = await response.json().catch(() => {
+  const data: unknown = await response.json().catch(() => {
     throw new ProviderError("parse", "The local model returned a non-JSON response.");
   });
-  const text = data?.choices?.[0]?.message?.content;
-  if (typeof text !== "string" || !text.trim()) {
-    throw new ProviderError("parse", "The local model response did not include choices[0].message.content.");
+  return normalizeLocalCompletion(data);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function textFromContent(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim()) return value;
+  if (!Array.isArray(value)) return undefined;
+  const parts = value.flatMap((part) => {
+    const entry = asRecord(part);
+    if (!entry || (entry.type !== "text" && entry.type !== "output_text") || typeof entry.text !== "string") return [];
+    return entry.text.trim() ? [entry.text] : [];
+  });
+  return parts.length ? parts.join("") : undefined;
+}
+
+function asTokenCount(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+export function normalizeLocalCompletion(data: unknown): ProviderResult {
+  const payload = asRecord(data);
+  if (!payload) throw new ProviderError("parse", "The local model returned a JSON value that was not an object.");
+
+  const firstChoice = Array.isArray(payload.choices) ? asRecord(payload.choices[0]) : null;
+  const choiceMessage = asRecord(firstChoice?.message);
+  const nativeMessage = asRecord(payload.message);
+  const responseOutput = Array.isArray(payload.output)
+    ? payload.output.flatMap((entry) => textFromContent(asRecord(entry)?.content)).join("")
+    : undefined;
+  const text = textFromContent(choiceMessage?.content)
+    ?? textFromContent(firstChoice?.text)
+    ?? textFromContent(nativeMessage?.content)
+    ?? textFromContent(payload.response)
+    ?? textFromContent(payload.output_text)
+    ?? (responseOutput?.trim() ? responseOutput : undefined);
+
+  if (!text) {
+    const receivedKeys = Object.keys(payload).slice(0, 6).join(", ") || "none";
+    throw new ProviderError("parse", `The local model returned no supported generated text (received keys: ${receivedKeys}). Use an OpenAI-compatible /v1 endpoint, or verify that the server returns a completed chat response rather than tools-only or streaming data.`);
   }
-  const usage = data?.usage;
+
+  const usage = asRecord(payload.usage);
+  const inputTokens = asTokenCount(usage?.prompt_tokens) ?? asTokenCount(usage?.input_tokens) ?? asTokenCount(payload.prompt_eval_count);
+  const outputTokens = asTokenCount(usage?.completion_tokens) ?? asTokenCount(usage?.output_tokens) ?? asTokenCount(payload.eval_count);
+  const totalTokens = asTokenCount(usage?.total_tokens) ?? (inputTokens !== undefined && outputTokens !== undefined ? inputTokens + outputTokens : undefined);
   return {
     text,
-    usage: usage
-      ? { inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens, totalTokens: usage.total_tokens }
-      : undefined,
-    finishReason: data?.choices?.[0]?.finish_reason,
+    usage: inputTokens !== undefined || outputTokens !== undefined || totalTokens !== undefined ? { inputTokens, outputTokens, totalTokens } : undefined,
+    finishReason: typeof firstChoice?.finish_reason === "string" ? firstChoice.finish_reason : typeof payload.done_reason === "string" ? payload.done_reason : typeof payload.status === "string" ? payload.status : undefined,
   };
 }
 

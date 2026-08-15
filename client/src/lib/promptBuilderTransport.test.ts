@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { assertLocalEndpoint, localCorsGuidance, localCorsSetupGuide, probeLocalServer, ProviderError } from "./promptBuilderTransport";
+import { assertLocalEndpoint, localCorsGuidance, localCorsSetupGuide, normalizeLocalCompletion, probeLocalServer, ProviderError } from "./promptBuilderTransport";
 
 describe("local provider endpoint policy", () => {
   it("accepts an explicitly local OpenAI-compatible endpoint", () => {
@@ -48,5 +48,23 @@ describe("local provider endpoint policy", () => {
     expect(localCorsSetupGuide("lmstudio", "https://promptbuild.example").command).toBe("lms server start --cors");
     expect(localCorsSetupGuide("ollama", "https://promptbuild.example").command).toContain("OLLAMA_ORIGINS=\"https://promptbuild.example\"");
     globalThis.fetch = originalFetch;
+  });
+});
+
+describe("local completion response normalization", () => {
+  it("accepts OpenAI-compatible string and text-part completion content", () => {
+    expect(normalizeLocalCompletion({ choices: [{ message: { content: "Standard completion" }, finish_reason: "stop" }], usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 } })).toEqual({ text: "Standard completion", usage: { inputTokens: 4, outputTokens: 2, totalTokens: 6 }, finishReason: "stop" });
+    expect(normalizeLocalCompletion({ choices: [{ message: { content: [{ type: "text", text: "Part one" }, { type: "output_text", text: " and two" }] } }] })).toMatchObject({ text: "Part one and two" });
+  });
+
+  it("accepts documented native Ollama and compatible fallback fields", () => {
+    expect(normalizeLocalCompletion({ message: { content: "Native chat" }, prompt_eval_count: 7, eval_count: 3, done_reason: "stop" })).toEqual({ text: "Native chat", usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 }, finishReason: "stop" });
+    expect(normalizeLocalCompletion({ response: "Native generation" })).toMatchObject({ text: "Native generation" });
+    expect(normalizeLocalCompletion({ output_text: "Responses-style output" })).toMatchObject({ text: "Responses-style output" });
+  });
+
+  it("rejects tool-only or malformed payloads with an actionable parse error", () => {
+    expect(() => normalizeLocalCompletion({ choices: [{ message: { tool_calls: [{ type: "function" }] } }] })).toThrow("no supported generated text");
+    expect(() => normalizeLocalCompletion([])).toThrow("not an object");
   });
 });
