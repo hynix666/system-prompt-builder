@@ -5,7 +5,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { createPromptAsset, listOwnedPromptAssets, listPromptAssets, removePromptAsset } from "./db";
-import { buildReferenceContext, extractReferenceText, MAX_REFERENCE_FILES } from "./referenceContext";
+import { buildReferenceContext, createReferencePreview, estimateReferenceTokens, extractReferenceText, MAX_REFERENCE_FILES, MAX_REFERENCE_TOKENS_PER_FILE, MAX_REFERENCE_TOKENS_TOTAL, MIN_REFERENCE_TOKENS, sourceCitation } from "./referenceContext";
 import { storageGetSignedUrl, storagePut } from "./storage";
 
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
@@ -25,6 +25,37 @@ function decodeUpload(base64: string) {
   return bytes;
 }
 
+const referenceSelectionSchema = z.object({
+  assetId: z.number().int().positive(),
+  tokenBudget: z.number().int().min(MIN_REFERENCE_TOKENS).max(MAX_REFERENCE_TOKENS_PER_FILE),
+});
+
+async function resolveReferenceSelection(userId: number, selection: Array<z.infer<typeof referenceSelectionSchema>>) {
+  const ids = selection.map((source) => source.assetId);
+  const assets = await listOwnedPromptAssets(userId, ids);
+  if (assets.length !== ids.length) {
+    throw new TRPCError({ code: "NOT_FOUND", message: "One or more selected references are unavailable in this workspace." });
+  }
+  const byId = new Map(assets.map((asset) => [asset.id, asset]));
+  return Promise.all(selection.map(async (source, index) => {
+    const asset = byId.get(source.assetId);
+    if (!asset) throw new TRPCError({ code: "NOT_FOUND", message: "Selected reference not found." });
+    const signedUrl = await storageGetSignedUrl(asset.storageKey);
+    const response = await fetch(signedUrl);
+    if (!response.ok) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Could not read ${asset.originalName}.` });
+    const text = await extractReferenceText({ originalName: asset.originalName, contentType: asset.contentType, bytes: new Uint8Array(await response.arrayBuffer()) });
+    return {
+      id: asset.id,
+      originalName: asset.originalName,
+      text,
+      tokenBudget: source.tokenBudget,
+      citation: sourceCitation(index),
+      estimatedTokens: estimateReferenceTokens(text),
+      preview: createReferencePreview(text),
+    };
+  }));
+}
+
 export const appRouter = router({
     // if you need to use socket.io, read and register route in server/_core/index.ts, all api should start with '/api/' so that the gateway can route correctly
   system: systemRouter,
@@ -40,26 +71,19 @@ export const appRouter = router({
   }),
   assets: router({
     list: protectedProcedure.query(({ ctx }) => listPromptAssets(ctx.user.id)),
-    compileContext: protectedProcedure
-      .input(z.object({ assetIds: z.array(z.number().int().positive()).min(1).max(MAX_REFERENCE_FILES).refine((ids) => new Set(ids).size === ids.length, "Each reference may be selected only once.") }))
+    previewContext: protectedProcedure
+      .input(z.object({ sources: z.array(referenceSelectionSchema).min(1).max(MAX_REFERENCE_FILES).refine((sources) => new Set(sources.map((source) => source.assetId)).size === sources.length, "Each reference may be selected only once.").refine((sources) => sources.reduce((total, source) => total + source.tokenBudget, 0) <= MAX_REFERENCE_TOKENS_TOTAL, `The combined reference budget may not exceed ${MAX_REFERENCE_TOKENS_TOTAL} tokens.`) }))
       .mutation(async ({ ctx, input }) => {
-        const assets = await listOwnedPromptAssets(ctx.user.id, input.assetIds);
-        if (assets.length !== input.assetIds.length) {
-          throw new TRPCError({ code: "NOT_FOUND", message: "One or more selected references are unavailable in this workspace." });
-        }
-        const byId = new Map(assets.map((asset) => [asset.id, asset]));
-        const extracted = await Promise.all(input.assetIds.map(async (id) => {
-          const asset = byId.get(id);
-          if (!asset) throw new TRPCError({ code: "NOT_FOUND", message: "Selected reference not found." });
-          const signedUrl = await storageGetSignedUrl(asset.storageKey);
-          const response = await fetch(signedUrl);
-          if (!response.ok) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Could not read ${asset.originalName}.` });
-          const text = await extractReferenceText({ originalName: asset.originalName, contentType: asset.contentType, bytes: new Uint8Array(await response.arrayBuffer()) });
-          return { id: asset.id, originalName: asset.originalName, text };
-        }));
-        const context = buildReferenceContext(extracted);
+        const sources = await resolveReferenceSelection(ctx.user.id, input.sources);
+        return { sources, totalBudget: input.sources.reduce((total, source) => total + source.tokenBudget, 0) };
+      }),
+    compileContext: protectedProcedure
+      .input(z.object({ sources: z.array(referenceSelectionSchema).min(1).max(MAX_REFERENCE_FILES).refine((sources) => new Set(sources.map((source) => source.assetId)).size === sources.length, "Each reference may be selected only once.").refine((sources) => sources.reduce((total, source) => total + source.tokenBudget, 0) <= MAX_REFERENCE_TOKENS_TOTAL, `The combined reference budget may not exceed ${MAX_REFERENCE_TOKENS_TOTAL} tokens.`) }))
+      .mutation(async ({ ctx, input }) => {
+        const sources = await resolveReferenceSelection(ctx.user.id, input.sources);
+        const context = buildReferenceContext(sources);
         if (!context) throw new TRPCError({ code: "BAD_REQUEST", message: "Selected sources did not contain readable text." });
-        return { context, sources: extracted.map(({ id, originalName }) => ({ id, originalName })) };
+        return { context, sources: sources.map(({ id, originalName, citation, tokenBudget, estimatedTokens }) => ({ id, originalName, citation, tokenBudget, estimatedTokens })) };
       }),
     upload: protectedProcedure
       .input(z.object({

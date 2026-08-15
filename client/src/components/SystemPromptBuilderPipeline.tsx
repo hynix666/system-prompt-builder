@@ -26,6 +26,7 @@ import { formatLint, lintPrompt } from "@/lib/promptLint";
 import { promptSummary, shortPromptHash, unifiedPromptDiff } from "@/lib/promptDiff";
 import { formatProviderError, callLocalOpenAICompatible, listLocalModels } from "@/lib/promptBuilderTransport";
 import { mockStageResponse, stageInstruction } from "@/lib/mockProvider";
+import { appendReferenceCitations } from "@/lib/referenceCitations";
 import { PromptDraftAudit } from "@/components/PromptDraftAudit";
 import { PromptReferenceVault, type AttachedReferenceContext } from "@/components/PromptReferenceVault";
 import type {
@@ -38,6 +39,7 @@ import type {
   StageOutput,
   StageStatus,
   Stakes,
+  ReferenceCitation,
   Verdict,
 } from "@/lib/promptBuilderTypes";
 
@@ -87,17 +89,18 @@ type PipelineState = {
   lintRevision: number | null;
   criticRevision: number | null;
   history: RevisionEntry[];
+  sources: ReferenceCitation[];
 };
 
 type PipelineAction =
   | { type: "reset" }
   | { type: "start"; stage: StageId }
-  | { type: "result"; stage: StageId; output: StageOutput; context: PromptContext; promptChanged: boolean }
+  | { type: "result"; stage: StageId; output: StageOutput; context: PromptContext; promptChanged: boolean; sources: ReferenceCitation[] }
   | { type: "error"; stage: StageId; message: string }
   | { type: "select"; stage: StageId };
 
 function initialState(): PipelineState {
-  return { context: EMPTY_CONTEXT, outputs: {}, active: "deconstruct", revision: 0, lintRevision: null, criticRevision: null, history: [] };
+  return { context: EMPTY_CONTEXT, outputs: {}, active: "deconstruct", revision: 0, lintRevision: null, criticRevision: null, history: [], sources: [] };
 }
 
 function pipelineReducer(state: PipelineState, action: PipelineAction): PipelineState {
@@ -115,6 +118,7 @@ function pipelineReducer(state: PipelineState, action: PipelineAction): Pipeline
   let history = state.history;
   let lintRevision = state.lintRevision;
   let criticRevision = state.criticRevision;
+  let sources = state.sources;
   const context = action.context;
 
   if (action.promptChanged && context.prompt !== state.context.prompt) {
@@ -127,11 +131,13 @@ function pipelineReducer(state: PipelineState, action: PipelineAction): Pipeline
           hash: shortPromptHash(state.context.prompt),
           stage: STAGES.find((stage) => stage.id === action.stage)?.label ?? action.stage,
           at: Date.now(),
+          sources: state.sources,
         },
         ...state.history,
       ].slice(0, 8);
     }
     revision += 1;
+    sources = action.sources;
     lintRevision = null;
     criticRevision = null;
     context.lint = "";
@@ -142,7 +148,7 @@ function pipelineReducer(state: PipelineState, action: PipelineAction): Pipeline
 
   if (action.stage === "lint" && context.lint) lintRevision = revision;
   if (action.stage === "critic" && context.critic) criticRevision = revision;
-  return { context, outputs, active: action.stage, revision, lintRevision, criticRevision, history };
+  return { context, outputs, active: action.stage, revision, lintRevision, criticRevision, history, sources };
 }
 
 function statusForVerdict(verdict: Verdict | "") {
@@ -281,7 +287,10 @@ export default function SystemPromptBuilderPipeline() {
         finishReason = result.finishReason;
         if (stageId === "deconstruct") next.spec = outputText;
         if (stageId === "calibrate") next.calibration = outputText;
-        if (stageId === "compile" || stageId === "harden" || stageId === "refine") next.prompt = outputText;
+        if (stageId === "compile" || stageId === "harden" || stageId === "refine") {
+          next.prompt = appendReferenceCitations(outputText, attachedReferences.sources);
+          outputText = next.prompt;
+        }
         if (stageId === "critique") next.critique = outputText;
         if (stageId === "critic") next.critic = /VERDICT:\s*GATE_FAIL/i.test(outputText) ? "GATE_FAIL" : /VERDICT:\s*DEGRADED/i.test(outputText) ? "DEGRADED" : "PASS";
       }
@@ -290,7 +299,7 @@ export default function SystemPromptBuilderPipeline() {
       if (promptChanged) {
         next = { ...next, lint: "", critic: "" };
       }
-      dispatch({ type: "result", stage: stageId, context: next, promptChanged, output: { text: outputText, status: "done", usage, finishReason } });
+      dispatch({ type: "result", stage: stageId, context: next, promptChanged, sources: attachedReferences.sources, output: { text: outputText, status: "done", usage, finishReason } });
       return next;
     } catch (error) {
       dispatch({ type: "error", stage: stageId, message: formatProviderError(error) });
@@ -365,7 +374,7 @@ export default function SystemPromptBuilderPipeline() {
     if (!canSave) return;
     const entry: SavedPrompt = {
       id: crypto.randomUUID(), brief: brief.slice(0, 92), prompt: state.context.prompt, stakes, verdict: finalVerdict, provider,
-      model: provider === "mock" ? "local demonstration" : localConfigs[provider].model, at: Date.now(),
+      model: provider === "mock" ? "local demonstration" : localConfigs[provider].model, at: Date.now(), sources: state.sources,
     };
     setSaved((current) => [entry, ...current].slice(0, 20));
   };
@@ -373,8 +382,8 @@ export default function SystemPromptBuilderPipeline() {
   const exportPrompt = (format: "txt" | "json" | "md") => {
     const base = `signal-ledger-r${state.revision || "draft"}`;
     if (format === "txt") download(`${base}.txt`, state.context.prompt, "text/plain;charset=utf-8");
-    if (format === "json") download(`${base}.json`, JSON.stringify({ brief, prompt: state.context.prompt, stakes, verdict: finalVerdict, revision: state.revision, provider, exportedAt: new Date().toISOString() }, null, 2), "application/json;charset=utf-8");
-    if (format === "md") download(`${base}.md`, `---\nrevision: ${state.revision}\nstakes: ${stakes}\nverdict: ${finalVerdict}\n---\n\n${state.context.prompt}`, "text/markdown;charset=utf-8");
+    if (format === "json") download(`${base}.json`, JSON.stringify({ brief, prompt: state.context.prompt, stakes, verdict: finalVerdict, revision: state.revision, provider, sources: state.sources, exportedAt: new Date().toISOString() }, null, 2), "application/json;charset=utf-8");
+    if (format === "md") download(`${base}.md`, `---\nrevision: ${state.revision}\nstakes: ${stakes}\nverdict: ${finalVerdict}\nsources: ${state.sources.map((source) => source.citation).join(", ") || "none"}\n---\n\n${state.context.prompt}`, "text/markdown;charset=utf-8");
   };
 
   return (
@@ -486,6 +495,7 @@ export default function SystemPromptBuilderPipeline() {
           <div className="sl-proof-document">
             {state.context.prompt ? <pre>{state.context.prompt}</pre> : <div className="sl-proof-empty"><FileText size={24} /><p>The compiled system prompt will appear here after the first build stage.</p></div>}
           </div>
+          {state.sources.length > 0 && <section className="sl-source-ledger" aria-label="Sources persisted with this revision"><p className="sl-section-label">SOURCE LEDGER / THIS REVISION</p>{state.sources.map((source) => <p key={source.id}><strong>[{source.citation}]</strong> {source.originalName} <span>{source.tokenBudget} TK / {source.estimatedTokens} available</span></p>)}</section>}
           <PromptDraftAudit draft={state.context.prompt} revision={state.revision} provider={provider} tokenBudget={Number(tokenBudget) || 0} />
           <div className="sl-proof-actions">
             <Button tone="paper" onClick={() => void copyPrompt()} disabled={!state.context.prompt}><Clipboard size={13} /> {copied ? "COPIED" : "COPY"}</Button>
@@ -498,7 +508,7 @@ export default function SystemPromptBuilderPipeline() {
             <button onClick={() => setShowHistory(true)}><History size={14} /> REVISION LEDGER ({state.history.length})</button>
             <button onClick={() => dispatch({ type: "reset" })}><RotateCcw size={14} /> RESET RUN</button>
           </div>
-          {saved.length > 0 && <section className="sl-vault"><p className="sl-section-label">SAVED VAULT</p>{saved.slice(0, 3).map((entry) => <div className="sl-vault-item" key={entry.id}><p>{entry.brief}</p><span>{new Date(entry.at).toLocaleDateString()} / {entry.stakes}</span></div>)}</section>}
+          {saved.length > 0 && <section className="sl-vault"><p className="sl-section-label">SAVED VAULT</p>{saved.slice(0, 3).map((entry) => <div className="sl-vault-item" key={entry.id}><p>{entry.brief}</p><span>{new Date(entry.at).toLocaleDateString()} / {entry.stakes} / {entry.sources?.length ?? 0} source{(entry.sources?.length ?? 0) === 1 ? "" : "s"}</span></div>)}</section>}
         </aside>
       </main>
 
@@ -520,5 +530,5 @@ const auditStyles = `
 `;
 
 const referenceVaultStyles = `
-  .sl-reference-vault{border-bottom:1px solid #cfc6b6;background:#e8e0d1;padding:18px}.sl-reference-vault-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;color:var(--blue)}.sl-reference-vault h3{margin:3px 0 0;color:var(--ink);font-family:"Source Serif 4",Georgia,serif;font-size:21px;letter-spacing:-.04em}.sl-reference-vault-copy{margin:8px 0 11px;color:#59616a;font-size:9px;line-height:1.5}.sl-reference-input{display:none}.sl-reference-upload,.sl-reference-login,.sl-reference-attach{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--blue);background:var(--blue);padding:8px 9px;color:#fff;font-size:9px;letter-spacing:.06em;cursor:pointer}.sl-reference-upload:disabled,.sl-reference-attach:disabled{opacity:.55;cursor:not-allowed}.sl-reference-login{background:transparent;color:var(--blue)}.sl-reference-attach{margin-top:10px;background:transparent;color:var(--blue)}.sl-reference-status,.sl-reference-empty{display:flex;align-items:center;gap:5px;margin:9px 0 0;color:#5c6060;font-size:8px;line-height:1.45}.sl-reference-spin{animation:sl-spin 700ms linear infinite}.sl-reference-list{display:grid;gap:5px;margin:10px 0 0;padding:0;list-style:none}.sl-reference-list li{display:flex;align-items:center;gap:4px;border-top:1px solid #d3c8b7;padding-top:6px}.sl-reference-select{position:relative;display:grid;place-items:center;width:13px;height:13px;border:1px solid #89909a;color:#fff}.sl-reference-select input{position:absolute;opacity:0;inset:0;cursor:pointer}.sl-reference-select:has(input:checked){border-color:var(--blue);background:var(--blue)}.sl-reference-select:has(input:focus-visible){outline:2px solid var(--blue);outline-offset:2px}.sl-reference-list a{display:flex;min-width:0;flex:1;align-items:center;gap:5px;color:#273442;font-size:8px;text-decoration:none}.sl-reference-list a span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sl-reference-list a small{margin-left:auto;color:#777873;font-size:7px}.sl-reference-list button{display:grid;place-items:center;border:0;background:transparent;color:var(--red);cursor:pointer}
+  .sl-reference-vault{border-bottom:1px solid #cfc6b6;background:#e8e0d1;padding:18px}.sl-reference-vault-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;color:var(--blue)}.sl-reference-vault h3{margin:3px 0 0;color:var(--ink);font-family:"Source Serif 4",Georgia,serif;font-size:21px;letter-spacing:-.04em}.sl-reference-vault-copy{margin:8px 0 11px;color:#59616a;font-size:9px;line-height:1.5}.sl-reference-input{display:none}.sl-reference-upload,.sl-reference-login,.sl-reference-attach,.sl-reference-preview{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--blue);background:var(--blue);padding:8px 9px;color:#fff;font-size:9px;letter-spacing:.06em;cursor:pointer}.sl-reference-upload:disabled,.sl-reference-attach:disabled,.sl-reference-preview:disabled{opacity:.55;cursor:not-allowed}.sl-reference-login,.sl-reference-preview,.sl-reference-attach{background:transparent;color:var(--blue)}.sl-reference-attach{margin-top:10px}.sl-reference-status,.sl-reference-empty,.sl-reference-total{display:flex;align-items:center;gap:5px;margin:9px 0 0;color:#5c6060;font-size:8px;line-height:1.45}.sl-reference-total{color:#394e6b}.sl-reference-spin{animation:sl-spin 700ms linear infinite}.sl-reference-list{display:grid;gap:5px;margin:10px 0 0;padding:0;list-style:none}.sl-reference-list li{display:flex;align-items:center;gap:4px;border-top:1px solid #d3c8b7;padding-top:6px}.sl-reference-list li.is-selected{background:rgba(23,92,255,.05)}.sl-reference-select{position:relative;display:grid;place-items:center;width:13px;height:13px;border:1px solid #89909a;color:#fff}.sl-reference-select input{position:absolute;opacity:0;inset:0;cursor:pointer}.sl-reference-select:has(input:checked){border-color:var(--blue);background:var(--blue)}.sl-reference-select:has(input:focus-visible){outline:2px solid var(--blue);outline-offset:2px}.sl-reference-list a{display:flex;min-width:0;flex:1;align-items:center;gap:5px;color:#273442;font-size:8px;text-decoration:none}.sl-reference-list a span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sl-reference-list a small{margin-left:auto;color:#777873;font-size:7px}.sl-reference-list button{display:grid;place-items:center;border:0;background:transparent;color:var(--red);cursor:pointer}.sl-reference-budget{display:flex;align-items:center;gap:2px;color:#576270;font-size:7px}.sl-reference-budget input{width:39px;border:1px solid #bcb29f;background:#fffdf7;padding:3px;color:var(--ink);font-size:8px;outline:none}.sl-reference-budget input:focus{border-color:var(--blue);box-shadow:0 0 0 2px rgba(23,92,255,.12)}.sl-reference-preview-panel{margin-top:10px;border-top:1px solid #c5baa8;padding-top:9px}.sl-reference-preview-panel details{margin-top:6px;border:1px solid #d5cbba;background:#fffdf7}.sl-reference-preview-panel summary{cursor:pointer;padding:6px;color:#303b48;font-size:8px}.sl-reference-preview-panel summary span{float:right;color:#6d737b;font-size:7px}.sl-reference-preview-panel pre{max-height:150px;overflow:auto;margin:0;border-top:1px solid #e1d8ca;padding:7px;white-space:pre-wrap;color:#525b65;font:8px/1.55 "DM Mono",monospace}.sl-source-ledger{margin-top:12px;border-left:2px solid var(--blue);background:#f6f1e6;padding:9px}.sl-source-ledger p:not(.sl-section-label){margin:6px 0 0;color:#3e4854;font-size:8px;line-height:1.45}.sl-source-ledger strong{color:var(--blue)}.sl-source-ledger span{color:#737672}
 `;

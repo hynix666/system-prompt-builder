@@ -1,11 +1,15 @@
-import { useRef, useState } from "react";
-import { Check, FileText, FolderOpen, Loader2, LogIn, Paperclip, Trash2, Upload } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
+import { Check, Eye, FileText, FolderOpen, Loader2, LogIn, Paperclip, Trash2, Upload } from "lucide-react";
 import { startLogin } from "@/const";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc } from "@/lib/trpc";
 
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
 const ACCEPTED_TYPES = new Set(["text/plain", "text/markdown", "application/pdf"]);
+const DEFAULT_REFERENCE_TOKENS = 500;
+const MIN_REFERENCE_TOKENS = 100;
+const MAX_REFERENCE_TOKENS = 1200;
+const MAX_TOTAL_TOKENS = 2400;
 
 function toBase64(file: File) {
   return new Promise<string>((resolve, reject) => {
@@ -23,7 +27,10 @@ function readableSize(bytes: number) {
   return bytes < 1024 * 1024 ? `${Math.max(1, Math.ceil(bytes / 1024))} KB` : `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export type AttachedReferenceContext = { context: string; sources: Array<{ id: number; originalName: string }> };
+export type AttachedReferenceContext = { context: string; sources: Array<{ id: number; originalName: string; citation: string; tokenBudget: number; estimatedTokens: number }> };
+
+type PreparedSource = AttachedReferenceContext["sources"][number] & { preview: string };
+type PreparedContext = { sources: PreparedSource[]; totalBudget: number };
 
 export function PromptReferenceVault({ onContextChange }: { onContextChange: (value: AttachedReferenceContext) => void }) {
   const { isAuthenticated, loading } = useAuth();
@@ -31,6 +38,8 @@ export function PromptReferenceVault({ onContextChange }: { onContextChange: (va
   const fileInput = useRef<HTMLInputElement>(null);
   const [notice, setNotice] = useState("");
   const [selected, setSelected] = useState<number[]>([]);
+  const [budgets, setBudgets] = useState<Record<number, number>>({});
+  const [prepared, setPrepared] = useState<PreparedContext | null>(null);
   const assets = trpc.assets.list.useQuery(undefined, { enabled: isAuthenticated });
   const upload = trpc.assets.upload.useMutation({
     onSuccess: () => {
@@ -43,23 +52,50 @@ export function PromptReferenceVault({ onContextChange }: { onContextChange: (va
     onSuccess: () => {
       setNotice("Reference removed from the vault. The storage object is no longer reachable from this app.");
       setSelected((current) => current.filter((id) => id !== remove.variables?.id));
+      setPrepared(null);
       onContextChange({ context: "", sources: [] });
       void utils.assets.list.invalidate();
+    },
+    onError: (error) => setNotice(error.message),
+  });
+  const previewContext = trpc.assets.previewContext.useMutation({
+    onSuccess: (value) => {
+      setPrepared(value);
+      setNotice("Review the extracted excerpts, then attach the sources to the next compile run.");
     },
     onError: (error) => setNotice(error.message),
   });
   const compileContext = trpc.assets.compileContext.useMutation({
     onSuccess: (value) => {
       onContextChange(value);
+      setPrepared(null);
       setNotice(`${value.sources.length} source${value.sources.length === 1 ? "" : "s"} attached to the next compilation run.`);
     },
     onError: (error) => setNotice(error.message),
   });
 
-  const toggleSelected = (id: number) => {
-    setSelected((current) => current.includes(id) ? current.filter((value) => value !== id) : current.length >= 4 ? current : [...current, id]);
+  const selection = useMemo(() => selected.map((assetId) => ({ assetId, tokenBudget: budgets[assetId] ?? DEFAULT_REFERENCE_TOKENS })), [selected, budgets]);
+  const totalBudget = selection.reduce((total, source) => total + source.tokenBudget, 0);
+
+  const clearPrepared = () => {
+    setPrepared(null);
     onContextChange({ context: "", sources: [] });
     setNotice("");
+  };
+
+  const toggleSelected = (id: number) => {
+    if (!selected.includes(id) && selected.length >= 4) {
+      setNotice("Select up to four references for one compilation run.");
+      return;
+    }
+    setSelected((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id]);
+    clearPrepared();
+  };
+
+  const updateBudget = (id: number, rawValue: string) => {
+    const tokenBudget = Math.max(MIN_REFERENCE_TOKENS, Math.min(MAX_REFERENCE_TOKENS, Number(rawValue.replace(/\D/g, "")) || MIN_REFERENCE_TOKENS));
+    setBudgets((current) => ({ ...current, [id]: tokenBudget }));
+    clearPrepared();
   };
 
   const handleFile = async (file: File | undefined) => {
@@ -94,7 +130,7 @@ export function PromptReferenceVault({ onContextChange }: { onContextChange: (va
           <input ref={fileInput} type="file" accept=".txt,.md,.markdown,.pdf,text/plain,text/markdown,application/pdf" className="sl-reference-input" onChange={(event) => { void handleFile(event.target.files?.[0]); event.target.value = ""; }} />
           <button className="sl-reference-upload" type="button" disabled={upload.isPending} onClick={() => fileInput.current?.click()}><Upload size={13} /> {upload.isPending ? "UPLOADING" : "UPLOAD REFERENCE"}</button>
           {notice && <p className="sl-reference-status" role="status">{notice}</p>}
-          {assets.isLoading ? <p className="sl-reference-status"><Loader2 className="sl-reference-spin" size={13} /> Loading stored files…</p> : assets.data?.length ? <><ul className="sl-reference-list">{assets.data.map((asset) => <li key={asset.id}><label className="sl-reference-select"><input type="checkbox" checked={selected.includes(asset.id)} onChange={() => toggleSelected(asset.id)} /><span aria-hidden="true">{selected.includes(asset.id) && <Check size={10} />}</span></label><a href={asset.url} target="_blank" rel="noreferrer"><FileText size={13} /><span>{asset.originalName}</span><small>{readableSize(asset.byteSize)}</small></a><button type="button" aria-label={`Remove ${asset.originalName}`} disabled={remove.isPending} onClick={() => remove.mutate({ id: asset.id })}><Trash2 size={13} /></button></li>)}</ul><button className="sl-reference-attach" type="button" disabled={!selected.length || compileContext.isPending} onClick={() => compileContext.mutate({ assetIds: selected })}>{compileContext.isPending ? "PREPARING SOURCES" : `ATTACH ${selected.length || ""} TO COMPILE`}</button></> : <p className="sl-reference-empty"><Paperclip size={14} /> No files stored yet.</p>}
+          {assets.isLoading ? <p className="sl-reference-status"><Loader2 className="sl-reference-spin" size={13} /> Loading stored files…</p> : assets.data?.length ? <><ul className="sl-reference-list">{assets.data.map((asset) => <li key={asset.id} className={selected.includes(asset.id) ? "is-selected" : ""}><label className="sl-reference-select"><input type="checkbox" checked={selected.includes(asset.id)} onChange={() => toggleSelected(asset.id)} /><span aria-hidden="true">{selected.includes(asset.id) && <Check size={10} />}</span></label><a href={asset.url} target="_blank" rel="noreferrer"><FileText size={13} /><span>{asset.originalName}</span><small>{readableSize(asset.byteSize)}</small></a>{selected.includes(asset.id) && <label className="sl-reference-budget"><span>TK</span><input aria-label={`Token budget for ${asset.originalName}`} inputMode="numeric" value={budgets[asset.id] ?? DEFAULT_REFERENCE_TOKENS} onChange={(event) => updateBudget(asset.id, event.target.value)} /></label>}<button type="button" aria-label={`Remove ${asset.originalName}`} disabled={remove.isPending} onClick={() => remove.mutate({ id: asset.id })}><Trash2 size={13} /></button></li>)}</ul>{selected.length > 0 && <p className="sl-reference-total">{selected.length} source{selected.length === 1 ? "" : "s"} / {totalBudget} of {MAX_TOTAL_TOKENS} input tokens</p>}<button className="sl-reference-preview" type="button" disabled={!selected.length || totalBudget > MAX_TOTAL_TOKENS || previewContext.isPending} onClick={() => previewContext.mutate({ sources: selection })}><Eye size={13} /> {previewContext.isPending ? "READING SOURCES" : "PREVIEW EXCERPTS"}</button>{prepared && <section className="sl-reference-preview-panel" aria-label="Reference excerpts before attachment"><p className="sl-section-label">EXCERPTS / PRE-ATTACHMENT REVIEW</p>{prepared.sources.map((source) => <details key={source.id} open><summary>[{source.citation}] {source.originalName} <span>{source.tokenBudget} TK / {source.estimatedTokens} AVAILABLE</span></summary><pre>{source.preview}</pre></details>)}<button className="sl-reference-attach" type="button" disabled={compileContext.isPending} onClick={() => compileContext.mutate({ sources: selection })}>{compileContext.isPending ? "ATTACHING" : "ATTACH REVIEWED SOURCES"}</button></section>}</> : <p className="sl-reference-empty"><Paperclip size={14} /> No files stored yet.</p>}
         </>
       )}
     </section>

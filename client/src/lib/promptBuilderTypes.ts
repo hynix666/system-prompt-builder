@@ -39,6 +39,15 @@ export interface RevisionEntry {
   hash: string;
   stage: string;
   at: number;
+  sources: ReferenceCitation[];
+}
+
+export interface ReferenceCitation {
+  id: number;
+  originalName: string;
+  citation: string;
+  tokenBudget: number;
+  estimatedTokens: number;
 }
 
 export interface SavedPrompt {
@@ -50,6 +59,7 @@ export interface SavedPrompt {
   provider: ProviderId;
   model: string;
   at: number;
+  sources: ReferenceCitation[];
 }
 
 export interface LocalProviderConfig {

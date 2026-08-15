@@ -34,4 +34,14 @@ describe("assets validation", () => {
     const caller = appRouter.createCaller(authenticatedContext());
     await expect(caller.assets.remove({ id: 0 })).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
+
+  it("rejects a source budget below the secure extraction minimum", async () => {
+    const caller = appRouter.createCaller(authenticatedContext());
+    await expect(caller.assets.previewContext({ sources: [{ assetId: 1, tokenBudget: 99 }] })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("rejects a combined source budget that exceeds the compilation limit", async () => {
+    const caller = appRouter.createCaller(authenticatedContext());
+    await expect(caller.assets.previewContext({ sources: [{ assetId: 1, tokenBudget: 1200 }, { assetId: 2, tokenBudget: 1200 }, { assetId: 3, tokenBudget: 100 }] })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
 });
