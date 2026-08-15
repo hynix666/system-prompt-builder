@@ -27,6 +27,7 @@ import { promptSummary, shortPromptHash, unifiedPromptDiff } from "@/lib/promptD
 import { formatProviderError, callLocalOpenAICompatible, listLocalModels } from "@/lib/promptBuilderTransport";
 import { mockStageResponse, stageInstruction } from "@/lib/mockProvider";
 import { PromptDraftAudit } from "@/components/PromptDraftAudit";
+import { PromptReferenceVault } from "@/components/PromptReferenceVault";
 import type {
   LocalProviderConfig,
   ProviderId,
@@ -377,7 +378,7 @@ export default function SystemPromptBuilderPipeline() {
 
   return (
     <div className="sl-app">
-      <style>{styles + auditStyles}</style>
+      <style>{styles + auditStyles + referenceVaultStyles}</style>
       <header className="sl-header">
         <div className="sl-header-rule" />
         <div className="sl-brand">
@@ -433,6 +434,7 @@ export default function SystemPromptBuilderPipeline() {
             <textarea value={testMessage} onChange={(event) => setTestMessage(event.target.value)} rows={3} aria-label="Preview message" />
             <label className="sl-budget">TOKEN BUDGET<input value={tokenBudget} inputMode="numeric" onChange={(event) => setTokenBudget(event.target.value.replace(/\D/g, ""))} /></label>
           </section>
+          <PromptReferenceVault />
         </aside>
 
         <section className="sl-workspace" aria-label="Pipeline workspace">
@@ -514,4 +516,8 @@ const styles = `
 
 const auditStyles = `
   .sl-draft-audit{margin-top:12px;border:1px solid #cbc1b0;background:#f9f4e9;padding:11px}.sl-draft-audit-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}.sl-draft-audit h3{margin:3px 0 0;font-family:"Source Serif 4",Georgia,serif;font-size:19px;letter-spacing:-.04em}.sl-audit-verdict{border:1px solid #69717b;padding:4px 5px;color:#69717b;font-size:7px;letter-spacing:.07em}.sl-audit-verdict.is-pass{border-color:var(--moss);color:var(--moss)}.sl-audit-verdict.is-degraded{border-color:#8a6100;color:#8a6100}.sl-audit-verdict.is-gate-fail{border-color:var(--red);color:var(--red)}.sl-draft-audit-summary{margin:9px 0 0;color:#565d65;font-size:9px}.sl-draft-audit-signals{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px;color:#495563;font-size:8px}.sl-draft-audit-signals span{display:inline-flex;align-items:center;gap:4px}.sl-draft-audit-actions{display:flex;gap:7px;margin-top:10px}.sl-draft-audit-actions button{display:inline-flex;align-items:center;gap:4px;border:0;background:transparent;padding:0;color:var(--blue);font-size:8px;letter-spacing:.05em;cursor:pointer}.sl-draft-audit-actions button:disabled{color:#888a86;cursor:not-allowed}.sl-draft-audit-findings{margin-top:10px;border-top:1px solid #ded5c7;padding-top:8px}.sl-draft-audit-findings p{margin:0 0 5px;color:#4c5560;font-size:8px;line-height:1.5}.sl-draft-audit-findings strong{color:var(--red)}
+`;
+
+const referenceVaultStyles = `
+  .sl-reference-vault{border-bottom:1px solid #cfc6b6;background:#e8e0d1;padding:18px}.sl-reference-vault-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;color:var(--blue)}.sl-reference-vault h3{margin:3px 0 0;color:var(--ink);font-family:"Source Serif 4",Georgia,serif;font-size:21px;letter-spacing:-.04em}.sl-reference-vault-copy{margin:8px 0 11px;color:#59616a;font-size:9px;line-height:1.5}.sl-reference-input{display:none}.sl-reference-upload,.sl-reference-login{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--blue);background:var(--blue);padding:8px 9px;color:#fff;font-size:9px;letter-spacing:.06em;cursor:pointer}.sl-reference-upload:disabled{opacity:.55;cursor:not-allowed}.sl-reference-login{background:transparent;color:var(--blue)}.sl-reference-status,.sl-reference-empty{display:flex;align-items:center;gap:5px;margin:9px 0 0;color:#5c6060;font-size:8px;line-height:1.45}.sl-reference-spin{animation:sl-spin 700ms linear infinite}.sl-reference-list{display:grid;gap:5px;margin:10px 0 0;padding:0;list-style:none}.sl-reference-list li{display:flex;align-items:center;gap:4px;border-top:1px solid #d3c8b7;padding-top:6px}.sl-reference-list a{display:flex;min-width:0;flex:1;align-items:center;gap:5px;color:#273442;font-size:8px;text-decoration:none}.sl-reference-list a span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sl-reference-list a small{margin-left:auto;color:#777873;font-size:7px}.sl-reference-list button{display:grid;place-items:center;border:0;background:transparent;color:var(--red);cursor:pointer}
 `;
