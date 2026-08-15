@@ -7,7 +7,7 @@ export const LOCAL_PROVIDER_PRESETS: Record<LocalProviderId, LocalProviderConfig
 
 export class ProviderError extends Error {
   constructor(
-    public readonly kind: "network" | "timeout" | "abort" | "http" | "parse" | "configuration",
+    public readonly kind: "network" | "timeout" | "abort" | "http" | "parse" | "configuration" | "provider",
     message: string,
     public readonly status?: number,
   ) {
@@ -191,9 +191,30 @@ function asTokenCount(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
+function boundedProviderMessage(value: unknown) {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+  return normalized ? normalized.slice(0, 360) : undefined;
+}
+
+function localApiError(payload: Record<string, unknown>) {
+  const error = payload.error;
+  const structuredError = asRecord(error);
+  const message = boundedProviderMessage(error)
+    ?? boundedProviderMessage(structuredError?.message)
+    ?? boundedProviderMessage(structuredError?.detail)
+    ?? boundedProviderMessage(payload.detail);
+  const code = boundedProviderMessage(structuredError?.code) ?? boundedProviderMessage(structuredError?.type);
+  if (error === undefined && !message) return undefined;
+  const detail = message ?? code ?? "The local server returned an error without a message.";
+  return `Local server error${code && message ? ` [${code}]` : ""}: ${detail} Check that the selected model is loaded and that the endpoint matches this provider.`;
+}
+
 export function normalizeLocalCompletion(data: unknown): ProviderResult {
   const payload = asRecord(data);
   if (!payload) throw new ProviderError("parse", "The local model returned a JSON value that was not an object.");
+  const providerError = localApiError(payload);
+  if (providerError) throw new ProviderError("provider", providerError);
 
   const firstChoice = Array.isArray(payload.choices) ? asRecord(payload.choices[0]) : null;
   const choiceMessage = asRecord(firstChoice?.message);

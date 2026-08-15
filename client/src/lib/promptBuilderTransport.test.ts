@@ -67,4 +67,16 @@ describe("local completion response normalization", () => {
     expect(() => normalizeLocalCompletion({ choices: [{ message: { tool_calls: [{ type: "function" }] } }] })).toThrow("no supported generated text");
     expect(() => normalizeLocalCompletion([])).toThrow("not an object");
   });
+
+  it("surfaces a bounded local API error payload before attempting completion parsing", () => {
+    try {
+      normalizeLocalCompletion({ error: { message: "model qwen3:8b is not loaded", code: "model_not_loaded" } });
+      throw new Error("Expected a provider error");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ProviderError);
+      expect(error).toMatchObject({ kind: "provider" });
+      expect((error as Error).message).toContain("Local server error [model_not_loaded]: model qwen3:8b is not loaded");
+      expect((error as Error).message).toContain("selected model is loaded");
+    }
+  });
 });
