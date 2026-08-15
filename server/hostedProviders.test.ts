@@ -25,6 +25,23 @@ describe("hosted provider gateway", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("uses model metadata, not generation, to report cached provider health", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ id: "gpt-4.1-mini" }), { status: 200 }));
+    const gateway = createHostedProviderGateway({ OPENAI_API_KEY: "server-key" }, fetchMock);
+    const first = await gateway.health();
+    expect(first.find((health) => health.id === "openai")).toMatchObject({ status: "healthy", model: "gpt-4.1-mini", detail: "Model metadata verified." });
+    expect(first.find((health) => health.id === "gemini")?.status).toBe("unconfigured");
+    expect(fetchMock).toHaveBeenCalledWith("https://api.openai.com/v1/models/gpt-4.1-mini", expect.objectContaining({ method: "GET" }));
+    await gateway.health();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports unavailable health without returning upstream provider details", async () => {
+    const gateway = createHostedProviderGateway({ GEMINI_API_KEY: "server-key" }, vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { message: "internal provider detail" } }), { status: 403 })));
+    const health = await gateway.health();
+    expect(health.find((entry) => entry.id === "gemini")).toMatchObject({ status: "unavailable", detail: "Server credentials cannot access this model." });
+  });
+
   it("uses provider-specific Anthropic and Gemini response parsers", async () => {
     const anthropicFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ content: [{ type: "text", text: "Claude result" }], usage: { input_tokens: 3, output_tokens: 5 }, stop_reason: "end_turn" }), { status: 200 }));
     const anthropic = createHostedProviderGateway({ ANTHROPIC_API_KEY: "anthropic-key" }, anthropicFetch);

@@ -14,6 +14,15 @@ export type HostedProviderCapability = {
   reason?: string;
 };
 
+export type HostedProviderHealth = {
+  id: HostedProviderId;
+  label: string;
+  model: string | null;
+  status: "healthy" | "unavailable" | "unconfigured" | "unknown";
+  checkedAt: number;
+  detail: string;
+};
+
 export class HostedProviderError extends Error {
   constructor(
     public readonly kind: "configuration" | "rate_limit" | "network" | "timeout" | "http" | "parse",
@@ -40,6 +49,8 @@ const REQUEST_WINDOW_MS = 60_000;
 const REQUESTS_PER_WINDOW = 12;
 const MAX_SYSTEM_CHARS = 48_000;
 const MAX_USER_CHARS = 48_000;
+const HEALTH_CACHE_MS = 120_000;
+const HEALTH_TIMEOUT_MS = 8_000;
 
 function readModels(value: string | undefined, fallback: string[]) {
   const parsed = value?.split(",").map((model) => model.trim()).filter(Boolean) ?? [];
@@ -124,8 +135,28 @@ async function callWithTimeout(fetchImpl: FetchLike, url: string, init: RequestI
   }
 }
 
+async function probeModel(fetchImpl: FetchLike, provider: HostedProviderId, config: ProviderConfig, model: string) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
+  const modelPath = encodeURIComponent(model);
+  let url = `${config.baseUrl}/models/${modelPath}`;
+  let headers: Record<string, string> = { authorization: `Bearer ${config.apiKey}` };
+  if (provider === "anthropic") headers = { "x-api-key": config.apiKey, "anthropic-version": "2023-06-01" };
+  if (provider === "gemini") headers = { "x-goog-api-key": config.apiKey };
+  try {
+    const response = await fetchImpl(url, { method: "GET", headers, signal: controller.signal });
+    if (!response.ok) return { status: "unavailable" as const, detail: response.status === 401 || response.status === 403 ? "Server credentials cannot access this model." : "The configured model is unavailable." };
+    return { status: "healthy" as const, detail: "Model metadata verified." };
+  } catch {
+    return { status: "unavailable" as const, detail: "The provider could not be reached." };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function createHostedProviderGateway(env: ServerEnvironment = process.env, fetchImpl: FetchLike = fetch) {
   const callsByUser = new Map<number, number[]>();
+  const healthCache = new Map<HostedProviderId, HostedProviderHealth>();
 
   const capabilities = (): HostedProviderCapability[] => Object.entries(providerConfigs(env)).map(([id, config]) => ({
     id: id as HostedProviderId,
@@ -134,6 +165,26 @@ export function createHostedProviderGateway(env: ServerEnvironment = process.env
     available: config.configured,
     reason: config.reason,
   }));
+
+  const health = async (force = false): Promise<HostedProviderHealth[]> => {
+    const configs = providerConfigs(env);
+    const now = Date.now();
+    return Promise.all((Object.keys(configs) as HostedProviderId[]).map(async (id) => {
+      const config = configs[id];
+      const cached = healthCache.get(id);
+      if (!force && cached && now - cached.checkedAt < HEALTH_CACHE_MS) return cached;
+      if (!config.configured) {
+        const unconfigured: HostedProviderHealth = { id, label: config.label, model: null, status: "unconfigured", checkedAt: now, detail: config.reason ?? "This provider is not configured on the server." };
+        healthCache.set(id, unconfigured);
+        return unconfigured;
+      }
+      const model = config.models[0];
+      const result = await probeModel(fetchImpl, id, config, model);
+      const next: HostedProviderHealth = { id, label: config.label, model, status: result.status, checkedAt: Date.now(), detail: result.detail };
+      healthCache.set(id, next);
+      return next;
+    }));
+  };
 
   const enforceRateLimit = (userId: number) => {
     const now = Date.now();
@@ -174,5 +225,5 @@ export function createHostedProviderGateway(env: ServerEnvironment = process.env
     return { text, usage: data?.usage ? { inputTokens: data.usage.total_input_tokens, outputTokens: data.usage.total_output_tokens, totalTokens: data.usage.total_tokens } : undefined, finishReason: data?.status };
   };
 
-  return { capabilities, generate };
+  return { capabilities, health, generate };
 }

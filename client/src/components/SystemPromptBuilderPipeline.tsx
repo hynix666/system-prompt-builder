@@ -246,6 +246,8 @@ export default function SystemPromptBuilderPipeline() {
   const [copied, setCopied] = useState(false);
   const [attachedReferences, setAttachedReferences] = useState<AttachedReferenceContext>({ context: "", sources: [] });
   const hostedCapabilities = trpc.hosted.capabilities.useQuery(undefined, { enabled: isAuthenticated && isHostedProvider(provider) });
+  const [healthForce, setHealthForce] = useState(false);
+  const hostedHealth = trpc.hosted.health.useQuery({ force: healthForce }, { enabled: isAuthenticated, refetchInterval: 120_000 });
   const hostedGenerate = trpc.hosted.generate.useMutation();
   const [state, dispatch] = useReducer(pipelineReducer, undefined, initialState);
   const abortRef = useRef<AbortController | null>(null);
@@ -283,7 +285,13 @@ export default function SystemPromptBuilderPipeline() {
   };
 
   const activeHostedCapability = isHostedProvider(provider) ? hostedCapabilities.data?.find((capability) => capability.id === provider) : undefined;
-  const hostedReady = !isHostedProvider(provider) || Boolean(isAuthenticated && activeHostedCapability?.available && hostedModels[provider]);
+  const activeHostedHealth = isHostedProvider(provider) ? hostedHealth.data?.find((health) => health.id === provider) : undefined;
+  const hostedReady = !isHostedProvider(provider) || Boolean(isAuthenticated && activeHostedCapability?.available && activeHostedHealth?.status === "healthy" && hostedModels[provider]);
+
+  const refreshHostedHealth = () => {
+    setHealthForce(true);
+    void hostedHealth.refetch();
+  };
 
   useEffect(() => {
     if (!isHostedProvider(provider) || !activeHostedCapability?.available || !activeHostedCapability.models.length) return;
@@ -452,9 +460,15 @@ export default function SystemPromptBuilderPipeline() {
             </div>
             <p className="sl-section-label sl-hosted-label">HOSTED MODELS / SERVER ADAPTER</p>
             <div className="sl-choice-grid sl-hosted-choice-grid" role="radiogroup" aria-label="Hosted model provider">
-              {HOSTED_PROVIDER_IDS.map((id) => <button key={id} className={`sl-choice ${provider === id ? "is-selected" : ""}`} role="radio" aria-checked={provider === id} onClick={() => { setProvider(id); setModelOptions([]); setModelNotice(""); }}>
-                {id === "openai" ? "OPENAI" : id === "anthropic" ? "CLAUDE" : id === "gemini" ? "GEMINI" : "COMPATIBLE"}
-              </button>)}
+              {HOSTED_PROVIDER_IDS.map((id) => {
+                const health = hostedHealth.data?.find((entry) => entry.id === id);
+                const status = health?.status ?? "unknown";
+                const marker = status === "healthy" ? "●" : status === "unavailable" ? "×" : status === "unconfigured" ? "—" : "○";
+                const label = id === "openai" ? "OPENAI" : id === "anthropic" ? "CLAUDE" : id === "gemini" ? "GEMINI" : "COMPATIBLE";
+                return <button key={id} className={`sl-choice ${provider === id ? "is-selected" : ""}`} role="radio" aria-checked={provider === id} aria-label={`${label}: ${health?.status ?? "health unchecked"}`} title={health?.detail ?? "Health check pending"} onClick={() => { setProvider(id); setModelOptions([]); setModelNotice(""); }}>
+                  {label} <span aria-hidden="true">{marker}</span>
+                </button>;
+              })}
             </div>
             {provider === "mock" ? <p className="sl-field-note"><FlaskConical size={13} /> Local sample outputs only. No network request.</p> : isLocalProvider(provider) ? (
               <div className="sl-provider-fields">
@@ -464,10 +478,12 @@ export default function SystemPromptBuilderPipeline() {
                 <Button tone="paper" onClick={() => void fetchModels}><RotateCcw size={13} /> DISCOVER LOCAL MODELS</Button>
                 {modelNotice && <p className="sl-field-note">{modelNotice}</p>}
               </div>
-            ) : !isAuthenticated ? <div className="sl-provider-fields"><p className="sl-field-note"><LockKeyhole size={13} /> Sign in to use the server-side hosted provider adapter.</p><Button tone="paper" onClick={startLogin}>SIGN IN</Button></div> : hostedCapabilities.isLoading ? <p className="sl-field-note"><span className="sl-spinner" /> Checking server provider access…</p> : !activeHostedCapability?.available ? <div className="sl-provider-fields"><p className="sl-field-note"><AlertTriangle size={13} /> {activeHostedCapability?.reason ?? "This hosted provider is not configured on the server."}</p><p className="sl-field-note">Provider credentials and allowlisted models are server-only. Local endpoint fields remain restricted to localhost.</p></div> : (
+            ) : !isAuthenticated ? <div className="sl-provider-fields"><p className="sl-field-note"><LockKeyhole size={13} /> Sign in to use the server-side hosted provider adapter.</p><Button tone="paper" onClick={startLogin}>SIGN IN</Button></div> : hostedCapabilities.isLoading || hostedHealth.isLoading ? <p className="sl-field-note"><span className="sl-spinner" /> Checking server provider access and model health…</p> : !activeHostedCapability?.available || activeHostedHealth?.status !== "healthy" ? <div className="sl-provider-fields"><p className="sl-field-note"><AlertTriangle size={13} /> {activeHostedHealth?.detail ?? activeHostedCapability?.reason ?? "This hosted provider is not configured on the server."}</p><p className="sl-field-note">Last checked: {activeHostedHealth ? new Date(activeHostedHealth.checkedAt).toLocaleTimeString() : "not yet checked"}. Provider credentials and endpoints remain server-only.</p><Button tone="paper" onClick={refreshHostedHealth} disabled={hostedHealth.isFetching}><RotateCcw size={13} /> {hostedHealth.isFetching ? "CHECKING" : "CHECK NOW"}</Button></div> : (
               <div className="sl-provider-fields">
                 <label>APPROVED MODEL<select value={hostedModels[provider]} onChange={(event) => setHostedModels((current) => ({ ...current, [provider]: event.target.value }))}>{activeHostedCapability.models.map((model) => <option value={model} key={model}>{model}</option>)}</select></label>
+                <p className="sl-field-note"><ShieldCheck size={13} /> API HEALTH: {activeHostedHealth.model ?? "approved model"} verified at {new Date(activeHostedHealth.checkedAt).toLocaleTimeString()}.</p>
                 <p className="sl-field-note"><LockKeyhole size={13} /> Hosted requests run through the authenticated server adapter. No API key or endpoint is stored in this browser.</p>
+                <Button tone="paper" onClick={refreshHostedHealth} disabled={hostedHealth.isFetching}><RotateCcw size={13} /> {hostedHealth.isFetching ? "CHECKING" : "CHECK NOW"}</Button>
               </div>
             )}
           </section>

@@ -73,6 +73,9 @@ export const appRouter = router({
   }),
   hosted: router({
     capabilities: protectedProcedure.query(() => hostedGateway.capabilities()),
+    health: protectedProcedure
+      .input(z.object({ force: z.boolean().default(false) }))
+      .query(({ input }) => hostedGateway.health(input.force)),
     generate: protectedProcedure
       .input(z.object({
         provider: z.enum(["openai", "anthropic", "gemini", "compatible"]),
