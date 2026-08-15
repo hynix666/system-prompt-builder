@@ -37,6 +37,7 @@ async function run() {
       response.end();
       return;
     }
+    if (request.url === "/api/ps") return json(response, { models: [{ name: "signal-ledger-local", size: 4_294_967_296, size_vram: 2_147_483_648, details: { quantization_level: "Q4_K_M" } }] }, { cors: true });
     if (request.url === "/v1/models") {
       await pause(55);
       return json(response, { data: [{ id: "signal-ledger-local" }] }, { cors: true });
@@ -68,6 +69,7 @@ async function run() {
       response.end();
       return;
     }
+    if (request.url === "/api/v0/models") return json(response, { data: [{ id: "lm-studio-local", state: "loaded", size: 3_221_225_472, gpu_memory_bytes: 1_610_612_736, offload_kv_cache_to_gpu: true, quantization: "Q4_K_M" }] }, { cors: true });
     if (request.url === "/v1/models") return json(response, { data: [{ id: "lm-studio-local" }] }, { cors: true });
     if (request.url === "/v1/chat/completions" && request.method === "POST") {
       lmGenerationCalls += 1;
@@ -89,6 +91,7 @@ async function run() {
 
     await page.getByRole("button", { name: "CHECK LOCAL SERVER" }).click();
     await page.getByText(/LOCAL HEALTH:/).waitFor();
+    await page.getByText("MODEL LOADED").waitFor();
     const healthText = await page.getByText(/LOCAL HEALTH:/).textContent();
     if (!healthText?.includes("Response:") || !/Response: [1-9]\d* ms\./.test(healthText)) {
       throw new Error(`Expected a positive latency display, received: ${healthText}`);
@@ -122,21 +125,26 @@ async function run() {
     await page.getByRole("combobox", { name: "MODEL" }).fill("lm-studio-local");
     await page.getByRole("button", { name: "CHECK LOCAL SERVER" }).click();
     await page.getByText(/LOCAL HEALTH:/).waitFor();
+    await page.getByText("MODEL LOADED").waitFor();
     const firstLmResponse = page.waitForResponse((response) => response.url() === `http://127.0.0.1:${LM_PORT}/v1/chat/completions` && response.request().method() === "POST", { timeout: 5_000 });
     await page.getByRole("button", { name: "RUN THIS" }).click();
     await firstLmResponse;
+    await page.getByText("MODEL UNLOADED").waitFor();
     await page.getByRole("button", { name: "SHOW RELOAD STEPS" }).click();
-    const retryResponse = page.waitForResponse((response) => response.url() === `http://127.0.0.1:${LM_PORT}/v1/chat/completions` && response.request().method() === "POST", { timeout: 5_000 });
-    await page.getByRole("button", { name: "RETRY AFTER RELOAD" }).click();
-    await retryResponse;
-    await page.waitForTimeout(500);
+    await page.getByText("RETRY IN 1s").waitFor();
+    await page.getByRole("button", { name: "RETRY IN 1s" }).click();
+    await page.getByText("RETRY SCHEDULED").waitFor();
+    await page.waitForTimeout(1_600);
     const retryText = await page.locator("body").innerText();
     if (!retryText.includes("LM Studio retry output") || !retryText.includes("Retry succeeded after the local model reload.")) {
       throw new Error(`Expected LM Studio retry success. Rendered page text: ${retryText.slice(0, 1800)}`);
     }
 
-    const diagnosticDownload = page.waitForEvent("download", { timeout: 5_000 });
     await page.getByRole("button", { name: "SUPPORT LOG" }).click();
+    await page.getByRole("dialog", { name: "Diagnostic preview" }).waitFor();
+    await page.getByText("promptContent").waitFor();
+    const diagnosticDownload = page.waitForEvent("download", { timeout: 5_000 });
+    await page.getByRole("button", { name: "DOWNLOAD REDACTED LOG" }).click();
     const diagnosticFile = await diagnosticDownload;
     const diagnosticPath = await diagnosticFile.path();
     if (!diagnosticPath) throw new Error("Expected a redacted diagnostic download path.");

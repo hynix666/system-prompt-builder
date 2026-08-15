@@ -27,6 +27,8 @@ import { promptSummary, shortPromptHash, unifiedPromptDiff } from "@/lib/promptD
 import { LOCAL_PROVIDER_PRESETS, ProviderError, formatProviderError, callLocalOpenAICompatible, listLocalModels, localCorsGuidance, localCorsSetupGuide, localRecoveryActions, probeLocalServer, type LocalRecoveryAction, type LocalServerHealth } from "@/lib/promptBuilderTransport";
 import { LOCAL_MODEL_MEMORY_KEY, parseLocalModelMemory, rememberLocalModel, type LocalModelMemory } from "@/lib/localModelMemory";
 import { serializeLocalDiagnostics } from "@/lib/localDiagnostics";
+import { localModelLoadStatus } from "@/lib/localModelStatus";
+import { localRetryBackoffSeconds, MAX_LOCAL_RELOAD_RETRIES } from "@/lib/localRetry";
 import { mockStageResponse, stageInstruction } from "@/lib/mockProvider";
 import { appendReferenceCitations } from "@/lib/referenceCitations";
 import { PromptDraftAudit } from "@/components/PromptDraftAudit";
@@ -272,6 +274,8 @@ export default function SystemPromptBuilderPipeline() {
   const [showCorsRecovery, setShowCorsRecovery] = useState(false);
   const [recoveryCopied, setRecoveryCopied] = useState(false);
   const [retryAttempt, setRetryAttempt] = useState(0);
+  const [retryCountdown, setRetryCountdown] = useState<number | null>(null);
+  const [showLocalDiagnostics, setShowLocalDiagnostics] = useState(false);
   const [hostedModels, setHostedModels] = useState<Record<HostedProviderId, string>>({ openai: "", anthropic: "", gemini: "", compatible: "" });
   const [modelNotice, setModelNotice] = useState("");
   const [tokenBudget, setTokenBudget] = useState("2000");
@@ -301,6 +305,20 @@ export default function SystemPromptBuilderPipeline() {
   const localOrigin = typeof window === "undefined" ? "this app origin" : window.location.origin;
   const activeLocalSetupGuide = isLocalProvider(provider) ? localCorsSetupGuide(provider, localOrigin) : null;
   const activeLocalReloadGuide = isLocalProvider(provider) ? localReloadGuide(provider, localConfigs[provider].model) : null;
+  const activeLocalModelStatus = isLocalProvider(provider) ? localModelLoadStatus(localHealth, localConfigs[provider].model) : null;
+  const localDiagnosticPreview = useMemo(() => {
+    if (!isLocalProvider(provider)) return "";
+    return serializeLocalDiagnostics({
+      provider,
+      endpoint: localConfigs[provider].baseUrl,
+      model: localConfigs[provider].model,
+      health: localHealth,
+      recovery: localRecovery,
+      modelOptionsCount: modelOptions.length,
+      modelNotice,
+      retryAttempt,
+    });
+  }, [provider, localConfigs, localHealth, localRecovery, modelOptions.length, modelNotice, retryAttempt]);
 
   useEffect(() => {
     window.localStorage.setItem("signal-ledger-vault-v1", JSON.stringify(saved.slice(0, 20)));
@@ -332,6 +350,8 @@ export default function SystemPromptBuilderPipeline() {
     setLocalRecovery([]);
     localRetryStageRef.current = null;
     setRetryAttempt(0);
+    setRetryCountdown(null);
+    setShowLocalDiagnostics(false);
     setShowLocalReloadGuide(false);
     setShowCorsRecovery(false);
     setLocalConfigs((current) => ({ ...current, [provider]: { ...current[provider], [key]: value } }));
@@ -345,6 +365,8 @@ export default function SystemPromptBuilderPipeline() {
     setLocalRecovery([]);
     localRetryStageRef.current = null;
     setRetryAttempt(0);
+    setRetryCountdown(null);
+    setShowLocalDiagnostics(false);
     setShowLocalReloadGuide(false);
     setShowCorsRecovery(false);
     setModelNotice(`${localProvider === "ollama" ? "Ollama" : "LM Studio"} preset applied.${lastSuccessfulModels[localProvider] ? ` Restored last successful model: ${lastSuccessfulModels[localProvider]}.` : " Check the local server before discovery."}`);
@@ -359,6 +381,8 @@ export default function SystemPromptBuilderPipeline() {
     setLocalRecovery([]);
     localRetryStageRef.current = null;
     setRetryAttempt(0);
+    setRetryCountdown(null);
+    setShowLocalDiagnostics(false);
     setShowLocalReloadGuide(false);
     setShowCorsRecovery(false);
   };
@@ -545,12 +569,24 @@ export default function SystemPromptBuilderPipeline() {
 
   const retryAfterReload = async () => {
     if (!isLocalProvider(provider) || running || !localRetryStageRef.current) return;
+    const nextAttempt = retryAttempt + 1;
+    const backoffSeconds = localRetryBackoffSeconds(nextAttempt);
+    if (backoffSeconds === null) {
+      setModelNotice(`Retry limit reached after ${MAX_LOCAL_RELOAD_RETRIES} attempts. Check the local server and model, then run the stage manually.`);
+      return;
+    }
     const stageId = localRetryStageRef.current;
     const identity = ++runRef.current;
     abortRef.current = new AbortController();
-    setRetryAttempt((current) => current + 1);
+    setRetryAttempt(nextAttempt);
     setRunning(true);
     try {
+      for (let remaining = backoffSeconds; remaining > 0; remaining -= 1) {
+        setRetryCountdown(remaining);
+        await new Promise((resolve) => globalThis.setTimeout(resolve, 1_000));
+        if (identity !== runRef.current || abortRef.current.signal.aborted) return;
+      }
+      setRetryCountdown(null);
       const health = await probeLocalServer(provider, localConfigs[provider], abortRef.current.signal);
       setLocalHealth(health);
       if (health.status !== "healthy") {
@@ -566,23 +602,16 @@ export default function SystemPromptBuilderPipeline() {
       setLocalRecovery(localRecoveryActions(provider, error));
       setModelNotice(formatProviderError(error));
     } finally {
-      if (identity === runRef.current) setRunning(false);
+      if (identity === runRef.current) {
+        setRetryCountdown(null);
+        setRunning(false);
+      }
     }
   };
 
   const exportLocalDiagnostics = () => {
-    if (!isLocalProvider(provider)) return;
-    const body = serializeLocalDiagnostics({
-      provider,
-      endpoint: localConfigs[provider].baseUrl,
-      model: localConfigs[provider].model,
-      health: localHealth,
-      recovery: localRecovery,
-      modelOptionsCount: modelOptions.length,
-      modelNotice,
-      retryAttempt,
-    });
-    download(`signal-ledger-local-diagnostics-${Date.now()}.json`, body, "application/json;charset=utf-8");
+    if (!isLocalProvider(provider) || !localDiagnosticPreview) return;
+    download(`signal-ledger-local-diagnostics-${Date.now()}.json`, localDiagnosticPreview, "application/json;charset=utf-8");
     setModelNotice("Redacted local diagnostics exported; prompt content and credentials were excluded.");
   };
 
@@ -670,10 +699,11 @@ export default function SystemPromptBuilderPipeline() {
                 <datalist id="local-models">{modelOptions.map((model) => <option value={model} key={model} />)}</datalist>
                 <div className="sl-proof-actions"><Button tone="paper" onClick={() => void checkLocalServer(false)}><ShieldCheck size={13} /> CHECK LOCAL SERVER</Button><Button tone="paper" onClick={() => void fetchModels}><RotateCcw size={13} /> DISCOVER LOCAL MODELS</Button></div>
                 {lastSuccessfulModels[provider] && <p className="sl-field-note"><Check size={13} /> LAST SUCCESSFUL MODEL: <strong>{lastSuccessfulModels[provider]}</strong> — restored automatically for this provider.</p>}
+                {activeLocalModelStatus && <p className="sl-field-note" role="status"><span className="sl-stamp" style={{ "--stamp": activeLocalModelStatus.tone === "loaded" ? MOSS : activeLocalModelStatus.tone === "unloaded" || activeLocalModelStatus.tone === "unavailable" ? RED : "#667080" } as React.CSSProperties}>{activeLocalModelStatus.label}</span> {activeLocalModelStatus.detail}</p>}
                 {localHealth && <p className="sl-field-note">{localHealth.status === "healthy" ? <ShieldCheck size={13} /> : <AlertTriangle size={13} />} LOCAL HEALTH: {localHealth.detail}{typeof localHealth.latencyMs === "number" ? ` Response: ${localHealth.latencyMs} ms.` : ""}</p>}
                 {localHealth?.telemetry && <section className="sl-local-telemetry" aria-label="Loaded local model telemetry"><p className="sl-section-label">LOADED-MODEL TELEMETRY</p>{localHealth.telemetry.models.length ? <ul>{localHealth.telemetry.models.map((model) => <li key={model.id}><strong>{model.id}</strong>{model.quantization && <span> / {model.quantization}</span>}<div>{formatResourceBytes(model.memoryBytes) ? <>MEMORY: {formatResourceBytes(model.memoryBytes)}</> : <>MEMORY: not reported</>}{formatResourceBytes(model.gpuMemoryBytes) && <> · GPU MEMORY: {formatResourceBytes(model.gpuMemoryBytes)}</>}{typeof model.gpuOffload === "boolean" && <> · GPU KV CACHE: {model.gpuOffload ? "enabled" : "off"}</>}</div></li>)}</ul> : <p>{localHealth.telemetry.note ?? "The local API did not report a loaded model."}</p>}</section>}
                 {localRecovery.length > 0 && <section className="sl-local-recovery" aria-live="polite"><p className="sl-section-label">LOCAL RECOVERY</p><p>{localRecovery[0]?.detail}</p><div className="sl-proof-actions">{localRecovery.map((action) => <Button tone="paper" key={action.id} onClick={() => void runLocalRecoveryAction(action)}>{action.label}</Button>)}</div></section>}
-                {showLocalReloadGuide && activeLocalReloadGuide && <section className="sl-local-recovery" aria-label="Model reload guidance"><p className="sl-section-label">MODEL RELOAD STEPS</p><p>{activeLocalReloadGuide.note}</p><code>{activeLocalReloadGuide.command}</code><div className="sl-proof-actions"><Button tone="paper" onClick={() => void copyLocalReloadCommand()}><Clipboard size={13} /> {recoveryCopied ? "COPIED" : "COPY COMMAND"}</Button><Button tone="paper" onClick={() => void retryAfterReload()} disabled={running}><RotateCcw size={13} /> {running ? "RETRYING" : "RETRY AFTER RELOAD"}</Button><Button tone="paper" onClick={() => void checkLocalServer(false)}><ShieldCheck size={13} /> CHECK AFTER RELOAD</Button></div></section>}
+                {showLocalReloadGuide && activeLocalReloadGuide && <section className="sl-local-recovery" aria-label="Model reload guidance"><p className="sl-section-label">MODEL RELOAD STEPS</p><p>{activeLocalReloadGuide.note}</p><code>{activeLocalReloadGuide.command}</code>{retryCountdown !== null && <p className="sl-field-note" role="status"><span className="sl-stamp" style={{ "--stamp": BLUE } as React.CSSProperties}>RETRY SCHEDULED</span> Attempt {retryAttempt}/{MAX_LOCAL_RELOAD_RETRIES} begins in {retryCountdown}s.</p>}<div className="sl-proof-actions"><Button tone="paper" onClick={() => void copyLocalReloadCommand()}><Clipboard size={13} /> {recoveryCopied ? "COPIED" : "COPY COMMAND"}</Button><Button tone="paper" onClick={() => void retryAfterReload()} disabled={running || localRetryBackoffSeconds(retryAttempt + 1) === null}><RotateCcw size={13} /> {running ? "RETRYING" : localRetryBackoffSeconds(retryAttempt + 1) === null ? "RETRY LIMIT REACHED" : `RETRY IN ${localRetryBackoffSeconds(retryAttempt + 1)}s`}</Button><Button tone="paper" onClick={() => void checkLocalServer(false)}><ShieldCheck size={13} /> CHECK AFTER RELOAD</Button></div></section>}
                 {showCorsRecovery && activeLocalSetupGuide && <section className="sl-local-recovery" aria-label="Local CORS recovery guidance"><p className="sl-section-label">CORS RECOVERY</p><p>{activeLocalSetupGuide.note}</p><code>{activeLocalSetupGuide.command}</code><p><a href={activeLocalSetupGuide.docsUrl} target="_blank" rel="noreferrer">Open official instructions</a>, then check the local server again.</p></section>}
                 {localHealth?.status === "unavailable" && (localHealth.errorKind === "network" || localHealth.errorKind === "timeout") && <div className="sl-field-note" role="alert"><AlertTriangle size={13} /> <strong>CORS TROUBLESHOOTING:</strong> {localCorsGuidance(provider)} <code>{localOrigin}</code></div>}
                 {activeLocalSetupGuide && <details className="sl-local-setup"><summary>{activeLocalSetupGuide.title} — setup guide</summary><ol>{activeLocalSetupGuide.steps.map((step) => <li key={step}>{step}</li>)}</ol><code>{activeLocalSetupGuide.command}</code><p>{activeLocalSetupGuide.note} <a href={activeLocalSetupGuide.docsUrl} target="_blank" rel="noreferrer">Open official instructions</a>.</p></details>}
@@ -761,7 +791,7 @@ export default function SystemPromptBuilderPipeline() {
             <Button tone="paper" onClick={() => exportPrompt("txt")} disabled={!state.context.prompt}><Download size={13} /> TXT</Button>
             <Button tone="paper" onClick={() => exportPrompt("json")} disabled={!state.context.prompt}><FileJson size={13} /> JSON</Button>
             <Button tone="paper" onClick={() => exportPrompt("md")} disabled={!state.context.prompt}><FileText size={13} /> MD</Button>
-            {isLocalProvider(provider) && <Button tone="paper" onClick={exportLocalDiagnostics}><FileJson size={13} /> SUPPORT LOG</Button>}
+            {isLocalProvider(provider) && <Button tone="paper" onClick={() => setShowLocalDiagnostics(true)}><FileJson size={13} /> SUPPORT LOG</Button>}
           </div>
           <div className="sl-proof-footer">
             <button onClick={() => setShowHistory(true)}><History size={14} /> REVISION LEDGER ({state.history.length})</button>
@@ -776,6 +806,7 @@ export default function SystemPromptBuilderPipeline() {
       {showHistory && <div className="sl-modal-backdrop" onMouseDown={(event) => event.currentTarget === event.target && setShowHistory(false)}><section className="sl-modal sl-history-modal" role="dialog" aria-modal="true" aria-labelledby="history-title"><button className="sl-close" onClick={() => setShowHistory(false)} aria-label="Close revision ledger"><X size={18} /></button><History size={24} color={BLUE} /><p className="sl-section-label">REVISION LEDGER</p><h2 id="history-title">Earlier prompt states</h2>{state.history.length ? <div className="sl-history-list">{state.history.map((entry) => <article key={`${entry.revision}-${entry.hash}`}><div><strong>R{entry.revision}</strong><code>{entry.hash}</code></div><p>{entry.summary}</p><button onClick={() => { setComparison(entry); setShowHistory(false); }}>COMPARE WITH CURRENT <ChevronRight size={13} /></button></article>)}</div> : <p>No earlier compiled revision exists in this run.</p>}</section></div>}
 
       {comparison && <div className="sl-modal-backdrop" onMouseDown={(event) => event.currentTarget === event.target && setComparison(null)}><section className="sl-modal sl-comparison-modal" role="dialog" aria-modal="true" aria-labelledby="comparison-title"><button className="sl-close" onClick={() => setComparison(null)} aria-label="Close comparison"><X size={18} /></button><p className="sl-section-label">COMPARE / R{comparison.revision} → R{state.revision}</p><h2 id="comparison-title">Proof differences</h2><div className="sl-diff">{comparisonDiff.map((row, index) => <pre className={`sl-diff-${row.type}`} key={`${row.type}-${index}`}>{row.type === "added" ? "+" : row.type === "removed" ? "−" : "·"} {row.text}</pre>)}</div></section></div>}
+      {showLocalDiagnostics && isLocalProvider(provider) && <div className="sl-modal-backdrop" onMouseDown={(event) => event.currentTarget === event.target && setShowLocalDiagnostics(false)}><section className="sl-modal sl-comparison-modal" role="dialog" aria-modal="true" aria-labelledby="local-diagnostic-title"><button className="sl-close" onClick={() => setShowLocalDiagnostics(false)} aria-label="Close support log"><X size={18} /></button><p className="sl-section-label">LOCAL SUPPORT / REDACTED</p><h2 id="local-diagnostic-title">Diagnostic preview</h2><p>This preview excludes prompt content, credentials, query strings, and raw upstream payloads.</p><div className="sl-diff"><pre>{localDiagnosticPreview}</pre></div><div className="sl-proof-actions"><Button tone="blue" onClick={exportLocalDiagnostics}><Download size={13} /> DOWNLOAD REDACTED LOG</Button><Button tone="paper" onClick={() => setShowLocalDiagnostics(false)}>CLOSE</Button></div></section></div>}
     </div>
   );
 }
