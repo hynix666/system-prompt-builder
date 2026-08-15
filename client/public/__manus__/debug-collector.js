@@ -326,7 +326,7 @@
     );
 
     // Throttled scroll events
-    window.addEventListener(
+    globalThis.addEventListener(
       "scroll",
       function () {
         var now = Date.now();
@@ -360,10 +360,10 @@
       nav("replaceState");
     };
 
-    window.addEventListener("popstate", function () {
+    globalThis.addEventListener("popstate", function () {
       nav("popstate");
     });
-    window.addEventListener("hashchange", function () {
+    globalThis.addEventListener("hashchange", function () {
       nav("hashchange");
     });
   }
@@ -398,7 +398,7 @@
     };
   });
 
-  window.addEventListener("error", function (event) {
+  globalThis.addEventListener("error", function (event) {
     store.consoleLogs.push({
       timestamp: Date.now(),
       level: "ERROR",
@@ -425,7 +425,7 @@
     });
   });
 
-  window.addEventListener("unhandledrejection", function (event) {
+  globalThis.addEventListener("unhandledrejection", function (event) {
     var reason = event.reason;
     store.consoleLogs.push({
       timestamp: Date.now(),
@@ -757,7 +757,7 @@
   setInterval(reportLogs, CONFIG.reportInterval);
 
   // Report on page unload
-  window.addEventListener("beforeunload", function () {
+  globalThis.addEventListener("beforeunload", function () {
     var consoleLogs = store.consoleLogs;
     var networkRequests = store.networkRequests;
     var uiEvents = store.uiEvents;
