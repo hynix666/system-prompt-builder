@@ -30,8 +30,9 @@ describe("hosted provider gateway", () => {
     const anthropic = createHostedProviderGateway({ ANTHROPIC_API_KEY: "anthropic-key" }, anthropicFetch);
     await expect(anthropic.generate({ provider: "anthropic", ...request, model: "claude-sonnet-4-5" })).resolves.toMatchObject({ text: "Claude result", finishReason: "end_turn" });
 
-    const geminiFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: "Gemini result" }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 6, totalTokenCount: 10 } }), { status: 200 }));
+    const geminiFetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ status: "completed", steps: [{ type: "model_output", content: [{ type: "text", text: "Gemini result" }] }], usage: { total_input_tokens: 4, total_output_tokens: 6, total_tokens: 10 } }), { status: 200 }));
     const gemini = createHostedProviderGateway({ GEMINI_API_KEY: "gemini-key" }, geminiFetch);
-    await expect(gemini.generate({ provider: "gemini", ...request, model: "gemini-2.5-flash" })).resolves.toMatchObject({ text: "Gemini result", usage: { totalTokens: 10 } });
+    await expect(gemini.generate({ provider: "gemini", ...request, model: "gemini-3.6-flash" })).resolves.toMatchObject({ text: "Gemini result", usage: { totalTokens: 10 }, finishReason: "completed" });
+    expect(geminiFetch).toHaveBeenCalledWith("https://generativelanguage.googleapis.com/v1beta/interactions", expect.objectContaining({ body: expect.stringContaining('"store":false') }));
   });
 });

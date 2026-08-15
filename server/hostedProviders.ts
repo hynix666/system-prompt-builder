@@ -33,7 +33,7 @@ type ProviderConfig = { label: string; apiKey: string; baseUrl: string; models: 
 const DEFAULT_MODELS: Record<HostedProviderId, string[]> = {
   openai: ["gpt-4.1-mini"],
   anthropic: ["claude-sonnet-4-5"],
-  gemini: ["gemini-2.5-flash"],
+  gemini: ["gemini-3.6-flash"],
   compatible: [],
 };
 const REQUEST_WINDOW_MS = 60_000;
@@ -90,8 +90,13 @@ function extractAnthropicText(data: any) {
 }
 
 function extractGeminiText(data: any) {
-  const parts = data?.candidates?.[0]?.content?.parts;
-  return Array.isArray(parts) ? parts.map((part: any) => typeof part?.text === "string" ? part.text : "").filter(Boolean).join("\n") : "";
+  const steps = Array.isArray(data?.steps) ? data.steps : [];
+  return steps
+    .filter((step: any) => step?.type === "model_output")
+    .flatMap((step: any) => Array.isArray(step?.content) ? step.content : [])
+    .map((part: any) => typeof part?.text === "string" ? part.text : "")
+    .filter(Boolean)
+    .join("\n");
 }
 
 async function responseJson(response: Response) {
@@ -163,10 +168,10 @@ export function createHostedProviderGateway(env: ServerEnvironment = process.env
       if (!text.trim()) throw new HostedProviderError("parse", "Anthropic returned no usable text output.");
       return { text, usage: data?.usage ? { inputTokens: data.usage.input_tokens, outputTokens: data.usage.output_tokens, totalTokens: (data.usage.input_tokens ?? 0) + (data.usage.output_tokens ?? 0) } : undefined, finishReason: data?.stop_reason };
     }
-    const data = await callWithTimeout(fetchImpl, `${config.baseUrl}/models/${encodeURIComponent(request.model)}:generateContent`, { method: "POST", headers: { "content-type": "application/json", "x-goog-api-key": config.apiKey }, body: JSON.stringify({ systemInstruction: { parts: [{ text: request.system }] }, contents: [{ role: "user", parts: [{ text: request.user }] }], generationConfig: { temperature: request.temperature } }) });
+    const data = await callWithTimeout(fetchImpl, `${config.baseUrl}/interactions`, { method: "POST", headers: { "content-type": "application/json", "x-goog-api-key": config.apiKey }, body: JSON.stringify({ model: request.model, input: request.user, system_instruction: request.system, store: false, generation_config: { max_output_tokens: 4096 } }) });
     const text = extractGeminiText(data);
     if (!text.trim()) throw new HostedProviderError("parse", "Gemini returned no usable text output.");
-    return { text, usage: data?.usageMetadata ? { inputTokens: data.usageMetadata.promptTokenCount, outputTokens: data.usageMetadata.candidatesTokenCount, totalTokens: data.usageMetadata.totalTokenCount } : undefined, finishReason: data?.candidates?.[0]?.finishReason };
+    return { text, usage: data?.usage ? { inputTokens: data.usage.total_input_tokens, outputTokens: data.usage.total_output_tokens, totalTokens: data.usage.total_tokens } : undefined, finishReason: data?.status };
   };
 
   return { capabilities, generate };
