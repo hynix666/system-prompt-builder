@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import { InsertPromptAsset, InsertUser, promptAssets, users } from "../drizzle/schema";
 import { ENV } from './_core/env';
@@ -93,6 +93,13 @@ export async function listPromptAssets(userId: number) {
   const db = await getDb();
   if (!db) throw new Error("Database is unavailable");
   return db.select().from(promptAssets).where(eq(promptAssets.userId, userId)).orderBy(desc(promptAssets.createdAt));
+}
+
+export async function listOwnedPromptAssets(userId: number, ids: number[]) {
+  const db = await getDb();
+  if (!db) throw new Error("Database is unavailable");
+  if (!ids.length) return [];
+  return db.select().from(promptAssets).where(and(eq(promptAssets.userId, userId), inArray(promptAssets.id, ids)));
 }
 
 export async function createPromptAsset(asset: InsertPromptAsset) {

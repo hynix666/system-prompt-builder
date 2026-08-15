@@ -4,8 +4,9 @@ import { z } from "zod";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
-import { createPromptAsset, listPromptAssets, removePromptAsset } from "./db";
-import { storagePut } from "./storage";
+import { createPromptAsset, listOwnedPromptAssets, listPromptAssets, removePromptAsset } from "./db";
+import { buildReferenceContext, extractReferenceText, MAX_REFERENCE_FILES } from "./referenceContext";
+import { storageGetSignedUrl, storagePut } from "./storage";
 
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
 const ALLOWED_TYPES = ["text/plain", "text/markdown", "application/pdf"] as const;
@@ -39,6 +40,27 @@ export const appRouter = router({
   }),
   assets: router({
     list: protectedProcedure.query(({ ctx }) => listPromptAssets(ctx.user.id)),
+    compileContext: protectedProcedure
+      .input(z.object({ assetIds: z.array(z.number().int().positive()).min(1).max(MAX_REFERENCE_FILES).refine((ids) => new Set(ids).size === ids.length, "Each reference may be selected only once.") }))
+      .mutation(async ({ ctx, input }) => {
+        const assets = await listOwnedPromptAssets(ctx.user.id, input.assetIds);
+        if (assets.length !== input.assetIds.length) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "One or more selected references are unavailable in this workspace." });
+        }
+        const byId = new Map(assets.map((asset) => [asset.id, asset]));
+        const extracted = await Promise.all(input.assetIds.map(async (id) => {
+          const asset = byId.get(id);
+          if (!asset) throw new TRPCError({ code: "NOT_FOUND", message: "Selected reference not found." });
+          const signedUrl = await storageGetSignedUrl(asset.storageKey);
+          const response = await fetch(signedUrl);
+          if (!response.ok) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Could not read ${asset.originalName}.` });
+          const text = await extractReferenceText({ originalName: asset.originalName, contentType: asset.contentType, bytes: new Uint8Array(await response.arrayBuffer()) });
+          return { id: asset.id, originalName: asset.originalName, text };
+        }));
+        const context = buildReferenceContext(extracted);
+        if (!context) throw new TRPCError({ code: "BAD_REQUEST", message: "Selected sources did not contain readable text." });
+        return { context, sources: extracted.map(({ id, originalName }) => ({ id, originalName })) };
+      }),
     upload: protectedProcedure
       .input(z.object({
         originalName: z.string().trim().min(1).max(255),

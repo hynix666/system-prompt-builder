@@ -27,7 +27,7 @@ import { promptSummary, shortPromptHash, unifiedPromptDiff } from "@/lib/promptD
 import { formatProviderError, callLocalOpenAICompatible, listLocalModels } from "@/lib/promptBuilderTransport";
 import { mockStageResponse, stageInstruction } from "@/lib/mockProvider";
 import { PromptDraftAudit } from "@/components/PromptDraftAudit";
-import { PromptReferenceVault } from "@/components/PromptReferenceVault";
+import { PromptReferenceVault, type AttachedReferenceContext } from "@/components/PromptReferenceVault";
 import type {
   LocalProviderConfig,
   ProviderId,
@@ -221,6 +221,7 @@ export default function SystemPromptBuilderPipeline() {
     try { return JSON.parse(window.localStorage.getItem("signal-ledger-vault-v1") ?? "[]") as SavedPrompt[]; } catch { return []; }
   });
   const [copied, setCopied] = useState(false);
+  const [attachedReferences, setAttachedReferences] = useState<AttachedReferenceContext>({ context: "", sources: [] });
   const [state, dispatch] = useReducer(pipelineReducer, undefined, initialState);
   const abortRef = useRef<AbortController | null>(null);
   const runRef = useRef(0);
@@ -271,7 +272,7 @@ export default function SystemPromptBuilderPipeline() {
         outputText = formatLint(lint);
         next.lint = lint.verdict;
       } else {
-        const instruction = stageInstruction(stageId, brief, working, testMessage);
+        const instruction = stageInstruction(stageId, brief, working, testMessage, attachedReferences.context);
         const result = provider === "mock"
           ? mockStageResponse(stageId, brief, working, testMessage)
           : await callLocalOpenAICompatible(provider, localConfigs[provider], "You are one stage in a safe prompt-compilation workflow. Output only what the stage asks for.", instruction, signal);
@@ -434,14 +435,14 @@ export default function SystemPromptBuilderPipeline() {
             <textarea value={testMessage} onChange={(event) => setTestMessage(event.target.value)} rows={3} aria-label="Preview message" />
             <label className="sl-budget">TOKEN BUDGET<input value={tokenBudget} inputMode="numeric" onChange={(event) => setTokenBudget(event.target.value.replace(/\D/g, ""))} /></label>
           </section>
-          <PromptReferenceVault />
+          <PromptReferenceVault onContextChange={(value) => { setAttachedReferences(value); dispatch({ type: "reset" }); setComparison(null); }} />
         </aside>
 
         <section className="sl-workspace" aria-label="Pipeline workspace">
           <div className="sl-hero-image"><img src="/manus-storage/signal-ledger-workbench_821ab81a.png" alt="Editorial workbench with paper, pencil, and proof marks" /></div>
           <div className="sl-workspace-head">
             <div>
-              <p className="sl-kicker">Selected process / {stakes.toLowerCase()}</p>
+              <p className="sl-kicker">Selected process / {stakes.toLowerCase()}{attachedReferences.sources.length ? ` / ${attachedReferences.sources.length} source${attachedReferences.sources.length === 1 ? "" : "s"} attached` : ""}</p>
               <h2>Build an instruction set you can inspect.</h2>
             </div>
             <div className="sl-process-meta"><span>{selectedStages.length} STAGES</span><span>R{state.revision}</span></div>
@@ -519,5 +520,5 @@ const auditStyles = `
 `;
 
 const referenceVaultStyles = `
-  .sl-reference-vault{border-bottom:1px solid #cfc6b6;background:#e8e0d1;padding:18px}.sl-reference-vault-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;color:var(--blue)}.sl-reference-vault h3{margin:3px 0 0;color:var(--ink);font-family:"Source Serif 4",Georgia,serif;font-size:21px;letter-spacing:-.04em}.sl-reference-vault-copy{margin:8px 0 11px;color:#59616a;font-size:9px;line-height:1.5}.sl-reference-input{display:none}.sl-reference-upload,.sl-reference-login{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--blue);background:var(--blue);padding:8px 9px;color:#fff;font-size:9px;letter-spacing:.06em;cursor:pointer}.sl-reference-upload:disabled{opacity:.55;cursor:not-allowed}.sl-reference-login{background:transparent;color:var(--blue)}.sl-reference-status,.sl-reference-empty{display:flex;align-items:center;gap:5px;margin:9px 0 0;color:#5c6060;font-size:8px;line-height:1.45}.sl-reference-spin{animation:sl-spin 700ms linear infinite}.sl-reference-list{display:grid;gap:5px;margin:10px 0 0;padding:0;list-style:none}.sl-reference-list li{display:flex;align-items:center;gap:4px;border-top:1px solid #d3c8b7;padding-top:6px}.sl-reference-list a{display:flex;min-width:0;flex:1;align-items:center;gap:5px;color:#273442;font-size:8px;text-decoration:none}.sl-reference-list a span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sl-reference-list a small{margin-left:auto;color:#777873;font-size:7px}.sl-reference-list button{display:grid;place-items:center;border:0;background:transparent;color:var(--red);cursor:pointer}
+  .sl-reference-vault{border-bottom:1px solid #cfc6b6;background:#e8e0d1;padding:18px}.sl-reference-vault-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;color:var(--blue)}.sl-reference-vault h3{margin:3px 0 0;color:var(--ink);font-family:"Source Serif 4",Georgia,serif;font-size:21px;letter-spacing:-.04em}.sl-reference-vault-copy{margin:8px 0 11px;color:#59616a;font-size:9px;line-height:1.5}.sl-reference-input{display:none}.sl-reference-upload,.sl-reference-login,.sl-reference-attach{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--blue);background:var(--blue);padding:8px 9px;color:#fff;font-size:9px;letter-spacing:.06em;cursor:pointer}.sl-reference-upload:disabled,.sl-reference-attach:disabled{opacity:.55;cursor:not-allowed}.sl-reference-login{background:transparent;color:var(--blue)}.sl-reference-attach{margin-top:10px;background:transparent;color:var(--blue)}.sl-reference-status,.sl-reference-empty{display:flex;align-items:center;gap:5px;margin:9px 0 0;color:#5c6060;font-size:8px;line-height:1.45}.sl-reference-spin{animation:sl-spin 700ms linear infinite}.sl-reference-list{display:grid;gap:5px;margin:10px 0 0;padding:0;list-style:none}.sl-reference-list li{display:flex;align-items:center;gap:4px;border-top:1px solid #d3c8b7;padding-top:6px}.sl-reference-select{position:relative;display:grid;place-items:center;width:13px;height:13px;border:1px solid #89909a;color:#fff}.sl-reference-select input{position:absolute;opacity:0;inset:0;cursor:pointer}.sl-reference-select:has(input:checked){border-color:var(--blue);background:var(--blue)}.sl-reference-select:has(input:focus-visible){outline:2px solid var(--blue);outline-offset:2px}.sl-reference-list a{display:flex;min-width:0;flex:1;align-items:center;gap:5px;color:#273442;font-size:8px;text-decoration:none}.sl-reference-list a span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sl-reference-list a small{margin-left:auto;color:#777873;font-size:7px}.sl-reference-list button{display:grid;place-items:center;border:0;background:transparent;color:var(--red);cursor:pointer}
 `;
