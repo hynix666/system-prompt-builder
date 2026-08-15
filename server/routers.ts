@@ -7,9 +7,11 @@ import { protectedProcedure, publicProcedure, router } from "./_core/trpc";
 import { createPromptAsset, listOwnedPromptAssets, listPromptAssets, removePromptAsset } from "./db";
 import { buildReferenceContext, createReferencePreview, DEFAULT_REFERENCE_TOKENS, estimateReferenceTokens, extractReferenceText, findReferenceSearchMatches, MAX_REFERENCE_FILES, MAX_REFERENCE_TOKENS_PER_FILE, MAX_REFERENCE_TOKENS_TOTAL, MIN_REFERENCE_TOKENS, sourceCitation } from "./referenceContext";
 import { storageGetSignedUrl, storagePut } from "./storage";
+import { createHostedProviderGateway, HostedProviderError } from "./hostedProviders";
 
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024;
 const ALLOWED_TYPES = ["text/plain", "text/markdown", "application/pdf"] as const;
+const hostedGateway = createHostedProviderGateway();
 
 function safeFileName(name: string) {
   const normalized = name.normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
@@ -68,6 +70,27 @@ export const appRouter = router({
         success: true,
       } as const;
     }),
+  }),
+  hosted: router({
+    capabilities: protectedProcedure.query(() => hostedGateway.capabilities()),
+    generate: protectedProcedure
+      .input(z.object({
+        provider: z.enum(["openai", "anthropic", "gemini", "compatible"]),
+        model: z.string().trim().min(1).max(120),
+        system: z.string().min(1).max(48_000),
+        user: z.string().min(1).max(48_000),
+        temperature: z.number().min(0).max(1).default(0.2),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        try {
+          return await hostedGateway.generate({ ...input, userId: ctx.user.id });
+        } catch (error) {
+          if (error instanceof HostedProviderError) {
+            throw new TRPCError({ code: error.kind === "rate_limit" ? "TOO_MANY_REQUESTS" : error.kind === "configuration" ? "PRECONDITION_FAILED" : "BAD_GATEWAY", message: error.message });
+          }
+          throw error;
+        }
+      }),
   }),
   assets: router({
     list: protectedProcedure.query(({ ctx }) => listPromptAssets(ctx.user.id)),

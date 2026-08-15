@@ -29,8 +29,13 @@ import { mockStageResponse, stageInstruction } from "@/lib/mockProvider";
 import { appendReferenceCitations } from "@/lib/referenceCitations";
 import { PromptDraftAudit } from "@/components/PromptDraftAudit";
 import { PromptReferenceVault, type AttachedReferenceContext } from "@/components/PromptReferenceVault";
+import { trpc } from "@/lib/trpc";
+import { useAuth } from "@/_core/hooks/useAuth";
+import { startLogin } from "@/const";
 import type {
   LocalProviderConfig,
+  LocalProviderId,
+  HostedProviderId,
   ProviderId,
   PromptContext,
   RevisionEntry,
@@ -80,6 +85,16 @@ const DEPTH: Record<Stakes, StageId[]> = {
 };
 
 const EMPTY_CONTEXT: PromptContext = { spec: "", calibration: "", prompt: "", critique: "", lint: "", critic: "" };
+const LOCAL_PROVIDER_IDS: LocalProviderId[] = ["ollama", "lmstudio"];
+const HOSTED_PROVIDER_IDS: HostedProviderId[] = ["openai", "anthropic", "gemini", "compatible"];
+
+function isLocalProvider(provider: ProviderId): provider is LocalProviderId {
+  return LOCAL_PROVIDER_IDS.includes(provider as LocalProviderId);
+}
+
+function isHostedProvider(provider: ProviderId): provider is HostedProviderId {
+  return HOSTED_PROVIDER_IDS.includes(provider as HostedProviderId);
+}
 
 type PipelineState = {
   context: PromptContext;
@@ -208,15 +223,17 @@ function VerdictStamp({ value, subtle = false }: { value: Verdict | ""; subtle?:
 }
 
 export default function SystemPromptBuilderPipeline() {
+  const { isAuthenticated } = useAuth();
   const [brief, setBrief] = useState(DEFAULT_BRIEF);
   const [testMessage, setTestMessage] = useState(DEFAULT_TEST);
   const [stakes, setStakes] = useState<Stakes>("MEDIUM");
   const [provider, setProvider] = useState<ProviderId>("mock");
-  const [localConfigs, setLocalConfigs] = useState<Record<Exclude<ProviderId, "mock">, LocalProviderConfig>>({
+  const [localConfigs, setLocalConfigs] = useState<Record<LocalProviderId, LocalProviderConfig>>({
     ollama: { model: "", baseUrl: "http://localhost:11434/v1" },
     lmstudio: { model: "", baseUrl: "http://localhost:1234/v1" },
   });
   const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [hostedModels, setHostedModels] = useState<Record<HostedProviderId, string>>({ openai: "", anthropic: "", gemini: "", compatible: "" });
   const [modelNotice, setModelNotice] = useState("");
   const [tokenBudget, setTokenBudget] = useState("2000");
   const [running, setRunning] = useState(false);
@@ -228,6 +245,8 @@ export default function SystemPromptBuilderPipeline() {
   });
   const [copied, setCopied] = useState(false);
   const [attachedReferences, setAttachedReferences] = useState<AttachedReferenceContext>({ context: "", sources: [] });
+  const hostedCapabilities = trpc.hosted.capabilities.useQuery(undefined, { enabled: isAuthenticated && isHostedProvider(provider) });
+  const hostedGenerate = trpc.hosted.generate.useMutation();
   const [state, dispatch] = useReducer(pipelineReducer, undefined, initialState);
   const abortRef = useRef<AbortController | null>(null);
   const runRef = useRef(0);
@@ -259,9 +278,17 @@ export default function SystemPromptBuilderPipeline() {
   });
 
   const updateConfig = (key: keyof LocalProviderConfig, value: string) => {
-    if (provider === "mock") return;
+    if (!isLocalProvider(provider)) return;
     setLocalConfigs((current) => ({ ...current, [provider]: { ...current[provider], [key]: value } }));
   };
+
+  const activeHostedCapability = isHostedProvider(provider) ? hostedCapabilities.data?.find((capability) => capability.id === provider) : undefined;
+  const hostedReady = !isHostedProvider(provider) || Boolean(isAuthenticated && activeHostedCapability?.available && hostedModels[provider]);
+
+  useEffect(() => {
+    if (!isHostedProvider(provider) || !activeHostedCapability?.available || !activeHostedCapability.models.length) return;
+    setHostedModels((current) => current[provider] && activeHostedCapability.models.includes(current[provider]) ? current : { ...current, [provider]: activeHostedCapability.models[0] });
+  }, [provider, activeHostedCapability?.available, activeHostedCapability?.models.join(",")]);
 
   const runStage = async (stageId: StageId, working: PromptContext, signal: AbortSignal): Promise<PromptContext> => {
     dispatch({ type: "start", stage: stageId });
@@ -279,9 +306,12 @@ export default function SystemPromptBuilderPipeline() {
         next.lint = lint.verdict;
       } else {
         const instruction = stageInstruction(stageId, brief, working, testMessage, attachedReferences.context);
+        const systemPrompt = "You are one stage in a safe prompt-compilation workflow. Output only what the stage asks for.";
         const result = provider === "mock"
           ? mockStageResponse(stageId, brief, working, testMessage)
-          : await callLocalOpenAICompatible(provider, localConfigs[provider], "You are one stage in a safe prompt-compilation workflow. Output only what the stage asks for.", instruction, signal);
+          : isLocalProvider(provider)
+            ? await callLocalOpenAICompatible(provider, localConfigs[provider], systemPrompt, instruction, signal)
+            : await hostedGenerate.mutateAsync({ provider, model: hostedModels[provider], system: systemPrompt, user: instruction, temperature: 0.2 });
         outputText = result.text;
         usage = result.usage;
         finishReason = result.finishReason;
@@ -351,7 +381,7 @@ export default function SystemPromptBuilderPipeline() {
   };
 
   const fetchModels = async () => {
-    if (provider === "mock") return;
+    if (!isLocalProvider(provider)) return;
     setModelNotice("Checking local server…");
     try {
       const models = await listLocalModels(provider, localConfigs[provider]);
@@ -374,7 +404,7 @@ export default function SystemPromptBuilderPipeline() {
     if (!canSave) return;
     const entry: SavedPrompt = {
       id: crypto.randomUUID(), brief: brief.slice(0, 92), prompt: state.context.prompt, stakes, verdict: finalVerdict, provider,
-      model: provider === "mock" ? "local demonstration" : localConfigs[provider].model, at: Date.now(), sources: state.sources,
+      model: provider === "mock" ? "local demonstration" : isLocalProvider(provider) ? localConfigs[provider].model : hostedModels[provider], at: Date.now(), sources: state.sources,
     };
     setSaved((current) => [entry, ...current].slice(0, 20));
   };
@@ -400,7 +430,7 @@ export default function SystemPromptBuilderPipeline() {
         </div>
         <div className="sl-header-actions">
           <button className="sl-security-link" onClick={() => setShowSecurity(true)}><LockKeyhole size={14} /> STATIC-SAFE MODE</button>
-          {running ? <Button tone="red" onClick={stop}><CircleStop size={14} /> STOP</Button> : <Button tone="blue" onClick={() => void runAll()} disabled={!brief.trim()}><Play size={14} /> COMPILE <span className="sl-shortcut">⌘↵</span></Button>}
+          {running ? <Button tone="red" onClick={stop}><CircleStop size={14} /> STOP</Button> : <Button tone="blue" onClick={() => void runAll()} disabled={!brief.trim() || !hostedReady}><Play size={14} /> COMPILE <span className="sl-shortcut">⌘↵</span></Button>}
         </div>
       </header>
 
@@ -413,20 +443,31 @@ export default function SystemPromptBuilderPipeline() {
 
           <section className="sl-control-section">
             <p className="sl-section-label">02 / PROVIDER</p>
-            <div className="sl-choice-grid" role="radiogroup" aria-label="Model provider">
+            <div className="sl-choice-grid" role="radiogroup" aria-label="Local model provider">
               {(["mock", "ollama", "lmstudio"] as ProviderId[]).map((id) => (
                 <button key={id} className={`sl-choice ${provider === id ? "is-selected" : ""}`} role="radio" aria-checked={provider === id} onClick={() => { setProvider(id); setModelOptions([]); setModelNotice(""); }}>
                   {id === "mock" ? "DEMO" : id === "ollama" ? "OLLAMA" : "LM STUDIO"}
                 </button>
               ))}
             </div>
-            {provider === "mock" ? <p className="sl-field-note"><FlaskConical size={13} /> Local sample outputs only. No network request.</p> : (
+            <p className="sl-section-label sl-hosted-label">HOSTED MODELS / SERVER ADAPTER</p>
+            <div className="sl-choice-grid sl-hosted-choice-grid" role="radiogroup" aria-label="Hosted model provider">
+              {HOSTED_PROVIDER_IDS.map((id) => <button key={id} className={`sl-choice ${provider === id ? "is-selected" : ""}`} role="radio" aria-checked={provider === id} onClick={() => { setProvider(id); setModelOptions([]); setModelNotice(""); }}>
+                {id === "openai" ? "OPENAI" : id === "anthropic" ? "CLAUDE" : id === "gemini" ? "GEMINI" : "COMPATIBLE"}
+              </button>)}
+            </div>
+            {provider === "mock" ? <p className="sl-field-note"><FlaskConical size={13} /> Local sample outputs only. No network request.</p> : isLocalProvider(provider) ? (
               <div className="sl-provider-fields">
                 <label>LOCAL ENDPOINT<input value={localConfigs[provider].baseUrl} onChange={(event) => updateConfig("baseUrl", event.target.value)} /></label>
                 <label>MODEL<input list="local-models" value={localConfigs[provider].model} onChange={(event) => updateConfig("model", event.target.value)} placeholder="choose a loaded local model" /></label>
                 <datalist id="local-models">{modelOptions.map((model) => <option value={model} key={model} />)}</datalist>
                 <Button tone="paper" onClick={() => void fetchModels}><RotateCcw size={13} /> DISCOVER LOCAL MODELS</Button>
                 {modelNotice && <p className="sl-field-note">{modelNotice}</p>}
+              </div>
+            ) : !isAuthenticated ? <div className="sl-provider-fields"><p className="sl-field-note"><LockKeyhole size={13} /> Sign in to use the server-side hosted provider adapter.</p><Button tone="paper" onClick={startLogin}>SIGN IN</Button></div> : hostedCapabilities.isLoading ? <p className="sl-field-note"><span className="sl-spinner" /> Checking server provider access…</p> : !activeHostedCapability?.available ? <div className="sl-provider-fields"><p className="sl-field-note"><AlertTriangle size={13} /> {activeHostedCapability?.reason ?? "This hosted provider is not configured on the server."}</p><p className="sl-field-note">Provider credentials and allowlisted models are server-only. Local endpoint fields remain restricted to localhost.</p></div> : (
+              <div className="sl-provider-fields">
+                <label>APPROVED MODEL<select value={hostedModels[provider]} onChange={(event) => setHostedModels((current) => ({ ...current, [provider]: event.target.value }))}>{activeHostedCapability.models.map((model) => <option value={model} key={model}>{model}</option>)}</select></label>
+                <p className="sl-field-note"><LockKeyhole size={13} /> Hosted requests run through the authenticated server adapter. No API key or endpoint is stored in this browser.</p>
               </div>
             )}
           </section>
@@ -475,7 +516,7 @@ export default function SystemPromptBuilderPipeline() {
                 <h3>{activeStage.label}</h3>
                 <p>{activeStage.summary}</p>
               </div>
-              <Button tone="ink" onClick={() => void runOne()} disabled={running || !selectedStages.includes(activeStage.id)}><Play size={14} /> RUN THIS</Button>
+              <Button tone="ink" onClick={() => void runOne()} disabled={running || !selectedStages.includes(activeStage.id) || !hostedReady}><Play size={14} /> RUN THIS</Button>
             </div>
             <div className={`sl-output ${state.outputs[activeStage.id]?.status === "error" ? "is-error" : ""}`}>
               {state.outputs[activeStage.id]?.text ? <pre>{state.outputs[activeStage.id]?.text}</pre> : <div className="sl-empty"><Sparkles size={22} /><p>{selectedStages.includes(activeStage.id) ? "Select this stage and run it once its required context exists." : "This stage is omitted at the selected review depth."}</p></div>}

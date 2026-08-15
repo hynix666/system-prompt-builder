@@ -1,4 +1,6 @@
-export type ProviderId = "mock" | "ollama" | "lmstudio";
+export type HostedProviderId = "openai" | "anthropic" | "gemini" | "compatible";
+export type LocalProviderId = "ollama" | "lmstudio";
+export type ProviderId = "mock" | LocalProviderId | HostedProviderId;
 
 export type Stakes = "LOW" | "MEDIUM" | "HIGH" | "SAFETY-CRITICAL";
 
@@ -65,6 +67,14 @@ export interface SavedPrompt {
 export interface LocalProviderConfig {
   model: string;
   baseUrl: string;
+}
+
+export interface HostedProviderCapability {
+  id: HostedProviderId;
+  label: string;
+  models: string[];
+  available: boolean;
+  reason?: string;
 }
 
 export interface ProviderResult {

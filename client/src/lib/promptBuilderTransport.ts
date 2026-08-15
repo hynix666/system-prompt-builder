@@ -1,4 +1,4 @@
-import type { LocalProviderConfig, ProviderId, ProviderResult } from "./promptBuilderTypes";
+import type { LocalProviderConfig, LocalProviderId, ProviderResult } from "./promptBuilderTypes";
 
 export class ProviderError extends Error {
   constructor(
@@ -53,7 +53,7 @@ async function fetchWithTimeout(url: string, init: RequestInit, externalSignal?:
 }
 
 export async function callLocalOpenAICompatible(
-  provider: Exclude<ProviderId, "mock">,
+  provider: LocalProviderId,
   cfg: LocalProviderConfig,
   system: string,
   user: string,
@@ -94,7 +94,7 @@ export async function callLocalOpenAICompatible(
   };
 }
 
-export async function listLocalModels(provider: Exclude<ProviderId, "mock">, cfg: LocalProviderConfig, signal?: AbortSignal) {
+export async function listLocalModels(provider: LocalProviderId, cfg: LocalProviderConfig, signal?: AbortSignal) {
   void provider;
   const baseUrl = assertLocalEndpoint(cfg.baseUrl);
   const response = await fetchWithTimeout(`${baseUrl}/models`, {}, signal, 12_000);
