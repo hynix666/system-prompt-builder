@@ -21,8 +21,23 @@ export type LocalServerHealth = {
   endpoint: string;
   modelCount?: number;
   latencyMs?: number;
+  telemetry?: LocalRuntimeTelemetry;
   detail: string;
   errorKind?: ProviderError["kind"];
+};
+
+export type LocalRuntimeModel = {
+  id: string;
+  memoryBytes?: number;
+  gpuMemoryBytes?: number;
+  gpuOffload?: boolean;
+  quantization?: string;
+};
+
+export type LocalRuntimeTelemetry = {
+  source: "ollama-ps" | "lmstudio-v0-models";
+  models: LocalRuntimeModel[];
+  note?: string;
 };
 
 export type LocalCorsSetupGuide = {
@@ -88,6 +103,44 @@ async function fetchWithTimeout(url: string, init: RequestInit, externalSignal?:
   }
 }
 
+function asNonNegativeNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+async function getLocalRuntimeTelemetry(provider: LocalProviderId, baseUrl: string, signal?: AbortSignal): Promise<LocalRuntimeTelemetry | undefined> {
+  const serverRoot = new URL(baseUrl).origin;
+  try {
+    if (provider === "ollama") {
+      const response = await fetchWithTimeout(`${serverRoot}/api/ps`, {}, signal, 4_000);
+      const data = await response.json().catch(() => {
+        throw new ProviderError("parse", "The Ollama runtime endpoint returned non-JSON data.");
+      });
+      const models = Array.isArray(data?.models) ? data.models : [];
+      return {
+        source: "ollama-ps",
+        models: models.flatMap((model: { name?: unknown; model?: unknown; size?: unknown; size_vram?: unknown; details?: { quantization_level?: unknown } }) => {
+          const id = typeof model.name === "string" ? model.name : typeof model.model === "string" ? model.model : "";
+          return id ? [{ id, memoryBytes: asNonNegativeNumber(model.size), gpuMemoryBytes: asNonNegativeNumber(model.size_vram), quantization: typeof model.details?.quantization_level === "string" ? model.details.quantization_level : undefined }] : [];
+        }),
+      };
+    }
+
+    const response = await fetchWithTimeout(`${serverRoot}/api/v0/models`, {}, signal, 4_000);
+    const data = await response.json().catch(() => {
+      throw new ProviderError("parse", "The LM Studio telemetry endpoint returned non-JSON data.");
+    });
+    const models = Array.isArray(data?.data) ? data.data : [];
+    const loadedModels = models.filter((model: { state?: unknown }) => model.state === "loaded");
+    return {
+      source: "lmstudio-v0-models",
+      models: loadedModels.flatMap((model: { id?: unknown; size?: unknown; size_vram?: unknown; gpu_memory_bytes?: unknown; offload_kv_cache_to_gpu?: unknown; quantization?: unknown }) => typeof model.id === "string" ? [{ id: model.id, memoryBytes: asNonNegativeNumber(model.size), gpuMemoryBytes: asNonNegativeNumber(model.size_vram) ?? asNonNegativeNumber(model.gpu_memory_bytes), gpuOffload: typeof model.offload_kv_cache_to_gpu === "boolean" ? model.offload_kv_cache_to_gpu : undefined, quantization: typeof model.quantization === "string" ? model.quantization : undefined }] : []),
+      note: loadedModels.length ? "LM Studio reported loaded model state. Memory and GPU fields appear only when this local API returns them." : "LM Studio did not report a loaded model through its local REST endpoint.",
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export async function callLocalOpenAICompatible(
   provider: LocalProviderId,
   cfg: LocalProviderConfig,
@@ -143,7 +196,6 @@ export async function listLocalModels(provider: LocalProviderId, cfg: LocalProvi
 }
 
 export async function probeLocalServer(provider: LocalProviderId, cfg: LocalProviderConfig, signal?: AbortSignal): Promise<LocalServerHealth> {
-  void provider;
   const baseUrl = assertLocalEndpoint(cfg.baseUrl);
   const startedAt = globalThis.performance?.now?.() ?? Date.now();
   try {
@@ -151,7 +203,8 @@ export async function probeLocalServer(provider: LocalProviderId, cfg: LocalProv
     const data = await response.json().catch(() => ({}));
     const modelCount = Array.isArray(data?.data) ? data.data.length : undefined;
     const latencyMs = Math.max(0, Math.round((globalThis.performance?.now?.() ?? Date.now()) - startedAt));
-    return { status: "healthy", endpoint: baseUrl, modelCount, latencyMs, detail: modelCount === undefined ? "Local endpoint responded." : `${modelCount} local model${modelCount === 1 ? "" : "s"} reported.` };
+    const telemetry = await getLocalRuntimeTelemetry(provider, baseUrl, signal);
+    return { status: "healthy", endpoint: baseUrl, modelCount, latencyMs, telemetry, detail: modelCount === undefined ? "Local endpoint responded." : `${modelCount} local model${modelCount === 1 ? "" : "s"} reported.` };
   } catch (error) {
     const providerError = error instanceof ProviderError ? error : new ProviderError("network", "Could not reach the local model.");
     const latencyMs = Math.max(0, Math.round((globalThis.performance?.now?.() ?? Date.now()) - startedAt));

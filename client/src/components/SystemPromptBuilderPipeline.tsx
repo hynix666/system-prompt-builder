@@ -189,6 +189,14 @@ function statusForVerdict(verdict: Verdict | "") {
   return { label: "PENDING", color: "#667080" };
 }
 
+function formatResourceBytes(bytes: number | undefined) {
+  if (typeof bytes !== "number") return null;
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const unitIndex = Math.min(Math.floor(Math.log(Math.max(bytes, 1)) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** unitIndex;
+  return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
 function download(filename: string, body: string, mime: string) {
   const url = URL.createObjectURL(new Blob([body], { type: mime }));
   const element = document.createElement("a");
@@ -489,7 +497,7 @@ export default function SystemPromptBuilderPipeline() {
 
   return (
     <div className="sl-app">
-      <style>{styles + auditStyles + referenceVaultStyles + referencePreviewStyles + referenceSearchStyles + localSetupStyles}</style>
+      <style>{styles + auditStyles + referenceVaultStyles + referencePreviewStyles + referenceSearchStyles + localSetupStyles + localTelemetryStyles}</style>
       <header className="sl-header">
         <div className="sl-header-rule" />
         <div className="sl-brand">
@@ -542,6 +550,7 @@ export default function SystemPromptBuilderPipeline() {
                 <div className="sl-proof-actions"><Button tone="paper" onClick={() => void checkLocalServer(false)}><ShieldCheck size={13} /> CHECK LOCAL SERVER</Button><Button tone="paper" onClick={() => void fetchModels}><RotateCcw size={13} /> DISCOVER LOCAL MODELS</Button></div>
                 {lastSuccessfulModels[provider] && <p className="sl-field-note"><Check size={13} /> LAST SUCCESSFUL MODEL: <strong>{lastSuccessfulModels[provider]}</strong> — restored automatically for this provider.</p>}
                 {localHealth && <p className="sl-field-note">{localHealth.status === "healthy" ? <ShieldCheck size={13} /> : <AlertTriangle size={13} />} LOCAL HEALTH: {localHealth.detail}{typeof localHealth.latencyMs === "number" ? ` Response: ${localHealth.latencyMs} ms.` : ""}</p>}
+                {localHealth?.telemetry && <section className="sl-local-telemetry" aria-label="Loaded local model telemetry"><p className="sl-section-label">LOADED-MODEL TELEMETRY</p>{localHealth.telemetry.models.length ? <ul>{localHealth.telemetry.models.map((model) => <li key={model.id}><strong>{model.id}</strong>{model.quantization && <span> / {model.quantization}</span>}<div>{formatResourceBytes(model.memoryBytes) ? <>MEMORY: {formatResourceBytes(model.memoryBytes)}</> : <>MEMORY: not reported</>}{formatResourceBytes(model.gpuMemoryBytes) && <> · GPU MEMORY: {formatResourceBytes(model.gpuMemoryBytes)}</>}{typeof model.gpuOffload === "boolean" && <> · GPU KV CACHE: {model.gpuOffload ? "enabled" : "off"}</>}</div></li>)}</ul> : <p>{localHealth.telemetry.note ?? "The local API did not report a loaded model."}</p>}</section>}
                 {localHealth?.status === "unavailable" && (localHealth.errorKind === "network" || localHealth.errorKind === "timeout") && <div className="sl-field-note" role="alert"><AlertTriangle size={13} /> <strong>CORS TROUBLESHOOTING:</strong> {localCorsGuidance(provider)} <code>{localOrigin}</code></div>}
                 {activeLocalSetupGuide && <details className="sl-local-setup"><summary>{activeLocalSetupGuide.title} — setup guide</summary><ol>{activeLocalSetupGuide.steps.map((step) => <li key={step}>{step}</li>)}</ol><code>{activeLocalSetupGuide.command}</code><p>{activeLocalSetupGuide.note} <a href={activeLocalSetupGuide.docsUrl} target="_blank" rel="noreferrer">Open official instructions</a>.</p></details>}
                 {modelNotice && <p className="sl-field-note">{modelNotice}</p>}
@@ -668,4 +677,8 @@ const referenceSearchStyles = `
 
 const localSetupStyles = `
   .sl-local-setup{margin-top:3px;border:1px solid #d2c7b5;background:rgba(255,253,247,.68);color:#4b5560;font-size:9px;line-height:1.5}.sl-local-setup summary{padding:7px 8px;color:#26384f;font-size:8px;letter-spacing:.055em;cursor:pointer}.sl-local-setup summary:focus-visible{outline:2px solid var(--blue);outline-offset:2px}.sl-local-setup ol{display:grid;gap:3px;margin:0;padding:0 10px 7px 25px}.sl-local-setup code{display:block;overflow:auto;margin:0 8px;padding:6px;border-left:2px solid var(--blue);background:#f1ebdf;color:#243446;font-size:8px;white-space:nowrap}.sl-local-setup p{margin:7px 8px 8px;color:#5d646b;font-size:8px}.sl-local-setup a{color:var(--blue);font-weight:600}@media (max-width:760px){.sl-local-setup code{white-space:normal;word-break:break-word}}
+`;
+
+const localTelemetryStyles = `
+  .sl-local-telemetry{margin-top:3px;border-left:2px solid var(--blue);background:#f3eee3;padding:8px}.sl-local-telemetry ul{display:grid;gap:7px;margin:7px 0 0;padding:0;list-style:none}.sl-local-telemetry li{border-top:1px solid #ded5c7;padding-top:6px;color:#4e565f;font-size:8px;line-height:1.55}.sl-local-telemetry li:first-child{border-top:0;padding-top:0}.sl-local-telemetry strong{color:#26384f}.sl-local-telemetry span{color:#73736d}.sl-local-telemetry li div{margin-top:2px;color:#566270;font-size:7px;letter-spacing:.025em}.sl-local-telemetry>p:not(.sl-section-label){margin:7px 0 0;color:#5d646b;font-size:8px;line-height:1.45}
 `;
