@@ -11,20 +11,34 @@ export class ProviderError extends Error {
   }
 }
 
-const LOCAL_ONLY_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+function normalizeLocalInput(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return trimmed;
+  return /^[a-z][a-z\d+.-]*:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+}
+
+function isLoopbackHost(hostname: string) {
+  const host = hostname.toLowerCase().replace(/\.$/, "");
+  if (host === "localhost" || host === "[::1]" || host === "::1") return true;
+  const ipv4 = host.match(/^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  return Boolean(ipv4 && ipv4.slice(1).every((part) => Number(part) <= 255));
+}
 
 export function assertLocalEndpoint(value: string) {
   let url: URL;
   try {
-    url = new URL(value);
+    url = new URL(normalizeLocalInput(value));
   } catch {
     throw new ProviderError("configuration", "Enter a valid local server URL, such as http://localhost:11434/v1.");
   }
-  if (!LOCAL_ONLY_HOSTS.has(url.hostname)) {
-    throw new ProviderError("configuration", "Static mode permits only localhost endpoints. Hosted providers require a server-side adapter.");
-  }
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new ProviderError("configuration", "Local endpoint must use http or https.");
+  }
+  if (!isLoopbackHost(url.hostname)) {
+    throw new ProviderError("configuration", "Static mode permits only localhost endpoints. Hosted providers require a server-side adapter.");
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new ProviderError("configuration", "Local endpoint must not include credentials, query parameters, or fragments.");
   }
   return url.toString().replace(/\/$/, "");
 }

@@ -472,7 +472,7 @@ export default function SystemPromptBuilderPipeline() {
             </div>
             {provider === "mock" ? <p className="sl-field-note"><FlaskConical size={13} /> Local sample outputs only. No network request.</p> : isLocalProvider(provider) ? (
               <div className="sl-provider-fields">
-                <label>LOCAL ENDPOINT<input value={localConfigs[provider].baseUrl} onChange={(event) => updateConfig("baseUrl", event.target.value)} /></label>
+                <label>LOCAL ENDPOINT<input value={localConfigs[provider].baseUrl} onChange={(event) => updateConfig("baseUrl", event.target.value)} placeholder="localhost:11434/v1 or http://localhost:11434/v1" /></label>
                 <label>MODEL<input list="local-models" value={localConfigs[provider].model} onChange={(event) => updateConfig("model", event.target.value)} placeholder="choose a loaded local model" /></label>
                 <datalist id="local-models">{modelOptions.map((model) => <option value={model} key={model} />)}</datalist>
                 <Button tone="paper" onClick={() => void fetchModels}><RotateCcw size={13} /> DISCOVER LOCAL MODELS</Button>
