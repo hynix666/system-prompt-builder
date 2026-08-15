@@ -334,6 +334,7 @@ export default function SystemPromptBuilderPipeline() {
         setShowSecurity(false);
         setShowHistory(false);
         setComparison(null);
+        setShowLocalDiagnostics(false);
       }
       if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !running) {
         event.preventDefault();
@@ -344,8 +345,17 @@ export default function SystemPromptBuilderPipeline() {
     return () => window.removeEventListener("keydown", keydown);
   });
 
+  const cancelActiveProviderRun = () => {
+    runRef.current += 1;
+    abortRef.current?.abort();
+    localRetryStageRef.current = null;
+    setRetryCountdown(null);
+    setRunning(false);
+  };
+
   const updateConfig = (key: keyof LocalProviderConfig, value: string) => {
     if (!isLocalProvider(provider)) return;
+    cancelActiveProviderRun();
     setLocalHealth(null);
     setLocalRecovery([]);
     localRetryStageRef.current = null;
@@ -358,6 +368,7 @@ export default function SystemPromptBuilderPipeline() {
   };
 
   const applyLocalPreset = (localProvider: LocalProviderId) => {
+    cancelActiveProviderRun();
     setProvider(localProvider);
     setLocalConfigs((current) => ({ ...current, [localProvider]: { ...LOCAL_PROVIDER_PRESETS[localProvider], model: lastSuccessfulModels[localProvider] } }));
     setModelOptions([]);
@@ -373,6 +384,7 @@ export default function SystemPromptBuilderPipeline() {
   };
 
   const selectLocalProvider = (localProvider: LocalProviderId) => {
+    cancelActiveProviderRun();
     setProvider(localProvider);
     setLocalConfigs((current) => current[localProvider].model || !lastSuccessfulModels[localProvider] ? current : { ...current, [localProvider]: { ...current[localProvider], model: lastSuccessfulModels[localProvider] } });
     setModelOptions([]);
@@ -389,6 +401,17 @@ export default function SystemPromptBuilderPipeline() {
 
   const rememberSuccessfulLocalModel = (localProvider: LocalProviderId, model: string) => {
     setLastSuccessfulModels((current) => rememberLocalModel(current, localProvider, model));
+  };
+
+  const selectMockProvider = () => {
+    cancelActiveProviderRun();
+    setProvider("mock");
+    setModelOptions([]);
+    setModelNotice("");
+    setLocalHealth(null);
+    setLocalRecovery([]);
+    setShowLocalReloadGuide(false);
+    setShowCorsRecovery(false);
   };
 
   const activeHostedCapability = isHostedProvider(provider) ? hostedCapabilities.data?.find((capability) => capability.id === provider) : undefined;
@@ -427,9 +450,11 @@ export default function SystemPromptBuilderPipeline() {
           : isLocalProvider(provider)
             ? await callLocalOpenAICompatible(provider, localConfigs[provider], systemPrompt, instruction, signal)
             : await hostedGenerate.mutateAsync({ provider, model: hostedModels[provider], system: systemPrompt, user: instruction, temperature: 0.2 });
+        if (signal.aborted) throw new ProviderError("abort", "Request cancelled.");
         if (isLocalProvider(provider)) {
           rememberSuccessfulLocalModel(provider, localConfigs[provider].model);
           localRetryStageRef.current = null;
+          setRetryAttempt(0);
           setLocalRecovery([]);
           setShowLocalReloadGuide(false);
           setShowCorsRecovery(false);
@@ -454,6 +479,7 @@ export default function SystemPromptBuilderPipeline() {
       dispatch({ type: "result", stage: stageId, context: next, promptChanged, sources: attachedReferences.sources, output: { text: outputText, status: "done", usage, finishReason } });
       return next;
     } catch (error) {
+      if (signal.aborted) throw error;
       if (isLocalProvider(provider)) {
         const recoveryActions = localRecoveryActions(provider, error);
         setLocalRecovery(recoveryActions);
@@ -505,6 +531,7 @@ export default function SystemPromptBuilderPipeline() {
   const stop = () => {
     runRef.current += 1;
     abortRef.current?.abort();
+    setRetryCountdown(null);
     setRunning(false);
   };
 
@@ -674,7 +701,7 @@ export default function SystemPromptBuilderPipeline() {
             <p className="sl-section-label">02 / PROVIDER</p>
             <div className="sl-choice-grid" role="radiogroup" aria-label="Local model provider">
               {(["mock", "ollama", "lmstudio"] as const).map((id) => (
-                <button key={id} className={`sl-choice ${provider === id ? "is-selected" : ""}`} role="radio" aria-checked={provider === id} onClick={() => id === "mock" ? (setProvider(id), setModelOptions([]), setModelNotice(""), setLocalHealth(null), setLocalRecovery([]), setShowLocalReloadGuide(false), setShowCorsRecovery(false)) : selectLocalProvider(id)}>
+                <button key={id} className={`sl-choice ${provider === id ? "is-selected" : ""}`} role="radio" aria-checked={provider === id} onClick={() => id === "mock" ? selectMockProvider() : selectLocalProvider(id)}>
                   {id === "mock" ? "DEMO" : id === "ollama" ? "OLLAMA" : "LM STUDIO"}
                 </button>
               ))}
@@ -686,7 +713,7 @@ export default function SystemPromptBuilderPipeline() {
                 const status = health?.status ?? "unknown";
                 const marker = status === "healthy" ? "●" : status === "unavailable" ? "×" : status === "unconfigured" ? "—" : "○";
                 const label = id === "openai" ? "OPENAI" : id === "anthropic" ? "CLAUDE" : id === "gemini" ? "GEMINI" : "COMPATIBLE";
-                return <button key={id} className={`sl-choice ${provider === id ? "is-selected" : ""}`} role="radio" aria-checked={provider === id} aria-label={`${label}: ${health?.status ?? "health unchecked"}`} title={health?.detail ?? "Health check pending"} onClick={() => { setProvider(id); setModelOptions([]); setModelNotice(""); }}>
+                return <button key={id} className={`sl-choice ${provider === id ? "is-selected" : ""}`} role="radio" aria-checked={provider === id} aria-label={`${label}: ${health?.status ?? "health unchecked"}`} title={health?.detail ?? "Health check pending"} onClick={() => { cancelActiveProviderRun(); setProvider(id); setModelOptions([]); setModelNotice(""); }}>
                   {label} <span aria-hidden="true">{marker}</span>
                 </button>;
               })}

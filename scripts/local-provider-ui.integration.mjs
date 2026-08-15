@@ -73,7 +73,7 @@ async function run() {
     if (request.url === "/v1/models") return json(response, { data: [{ id: "lm-studio-local" }] }, { cors: true });
     if (request.url === "/v1/chat/completions" && request.method === "POST") {
       lmGenerationCalls += 1;
-      if (lmGenerationCalls === 1) return json(response, { error: { code: "model_not_loaded", message: "model not loaded in memory" } }, { cors: true });
+      if (lmGenerationCalls % 2 === 1) return json(response, { error: { code: "model_not_loaded", message: "model not loaded in memory :: SYSTEM PROMPT PRIVATE USER REQUEST" } }, { cors: true });
       return json(response, { choices: [{ message: { content: "LM Studio retry output" }, finish_reason: "stop" }] }, { cors: true });
     }
     response.writeHead(404, { "Access-Control-Allow-Origin": "*" });
@@ -140,9 +140,24 @@ async function run() {
       throw new Error(`Expected LM Studio retry success. Rendered page text: ${retryText.slice(0, 1800)}`);
     }
 
+    const cancelledRetryResponse = page.waitForResponse((response) => response.url() === `http://127.0.0.1:${LM_PORT}/v1/chat/completions` && response.request().method() === "POST", { timeout: 5_000 });
+    await page.getByRole("button", { name: "RUN THIS" }).click();
+    await cancelledRetryResponse;
+    await page.getByText("MODEL UNLOADED").waitFor();
+    await page.getByRole("button", { name: "SHOW RELOAD STEPS" }).click();
+    await page.getByRole("button", { name: "RETRY IN 1s" }).click();
+    await page.getByText("RETRY SCHEDULED").waitFor();
+    await page.getByRole("combobox", { name: "MODEL" }).fill("cancelled-retry-model");
+    await page.waitForTimeout(1_300);
+    if (lmGenerationCalls !== 3) throw new Error(`Changing local configuration should cancel the queued retry; observed ${lmGenerationCalls} generation calls.`);
+
     await page.getByRole("button", { name: "SUPPORT LOG" }).click();
     await page.getByRole("dialog", { name: "Diagnostic preview" }).waitFor();
     await page.getByText("promptContent").waitFor();
+    await page.keyboard.press("Escape");
+    await page.getByRole("dialog", { name: "Diagnostic preview" }).waitFor({ state: "hidden" });
+    await page.getByRole("button", { name: "SUPPORT LOG" }).click();
+    await page.getByRole("dialog", { name: "Diagnostic preview" }).waitFor();
     const diagnosticDownload = page.waitForEvent("download", { timeout: 5_000 });
     await page.getByRole("button", { name: "DOWNLOAD REDACTED LOG" }).click();
     const diagnosticFile = await diagnosticDownload;

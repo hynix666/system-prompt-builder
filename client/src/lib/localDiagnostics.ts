@@ -12,19 +12,26 @@ export type LocalDiagnosticSnapshot = {
   retryAttempt: number;
 };
 
-function sanitize(value: string | undefined, fallback = "") {
-  if (!value) return fallback;
-  return value.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 360);
-}
-
 export function redactLocalEndpoint(value: string) {
   try {
     const candidate = /^[a-z][a-z\d+.-]*:\/\//i.test(value.trim()) ? value.trim() : `http://${value.trim()}`;
     const url = new URL(candidate);
-    return `${url.protocol}//${url.host}${url.pathname.replace(/\/{2,}/g, "/")}`;
+    return url.origin;
   } catch {
     return "<invalid-local-endpoint>";
   }
+}
+
+function diagnosticHealthCategory(health: LocalServerHealth) {
+  if (health.status === "healthy") return "healthy";
+  if (health.errorKind === "provider") return "provider-reported-error";
+  if (health.errorKind === "network") return "network-unreachable";
+  if (health.errorKind === "timeout") return "request-timeout";
+  if (health.errorKind === "configuration") return "configuration-error";
+  if (health.errorKind === "http") return "http-error";
+  if (health.errorKind === "parse") return "unsupported-response";
+  if (health.errorKind === "abort") return "request-cancelled";
+  return "local-server-unavailable";
 }
 
 export function buildLocalDiagnosticSnapshot(snapshot: LocalDiagnosticSnapshot) {
@@ -33,32 +40,30 @@ export function buildLocalDiagnosticSnapshot(snapshot: LocalDiagnosticSnapshot) 
     generatedAt: new Date().toISOString(),
     provider: snapshot.provider,
     endpoint: redactLocalEndpoint(snapshot.endpoint),
-    model: snapshot.model.trim() || "<not-selected>",
+    modelConfigured: Boolean(snapshot.model.trim()),
     health: snapshot.health
       ? {
           status: snapshot.health.status,
+          category: diagnosticHealthCategory(snapshot.health),
           modelCount: snapshot.health.modelCount ?? null,
           latencyMs: snapshot.health.latencyMs ?? null,
           errorKind: snapshot.health.errorKind ?? null,
-          detail: sanitize(snapshot.health.detail),
           telemetry: snapshot.health.telemetry
             ? {
                 source: snapshot.health.telemetry.source,
-                loadedModels: snapshot.health.telemetry.models.map((model) => ({
-                  id: sanitize(model.id, "<unknown-model>"),
+                loadedModelCount: snapshot.health.telemetry.models.length,
+                resourceReports: snapshot.health.telemetry.models.map((model) => ({
                   memoryBytes: model.memoryBytes ?? null,
                   gpuMemoryBytes: model.gpuMemoryBytes ?? null,
                   gpuOffload: model.gpuOffload ?? null,
-                  quantization: sanitize(model.quantization) || null,
                 })),
-                note: sanitize(snapshot.health.telemetry.note) || null,
               }
             : null,
         }
       : null,
     recoveryActions: snapshot.recovery.map(({ id, label }) => ({ id, label })),
     modelOptionsCount: snapshot.modelOptionsCount,
-    modelNotice: sanitize(snapshot.modelNotice) || null,
+    modelNoticePresent: Boolean(snapshot.modelNotice),
     retryAttempt: snapshot.retryAttempt,
     redaction: {
       promptContent: "excluded",

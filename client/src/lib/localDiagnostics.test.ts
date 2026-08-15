@@ -4,37 +4,32 @@ import { buildLocalDiagnosticSnapshot, redactLocalEndpoint, serializeLocalDiagno
 const recovery = [{ id: "show-reload-steps", label: "SHOW RELOAD STEPS", detail: "Load the model." }];
 
 describe("local diagnostics", () => {
-  it("redacts credentials and query strings while retaining a useful local endpoint", () => {
-    expect(redactLocalEndpoint("http://user:secret@localhost:11434/v1?token=never-export")).toBe("http://localhost:11434/v1");
+  it("redacts credentials, paths, and query strings while retaining a useful local origin", () => {
+    expect(redactLocalEndpoint("http://user:secret@localhost:11434/private/prompt?token=never-export")).toBe("http://localhost:11434");
   });
 
-  it("exports support state without prompt content or raw provider payloads", () => {
-    const snapshot = buildLocalDiagnosticSnapshot({
-      provider: "lmstudio",
-      endpoint: "localhost:1234/v1?prompt=secret",
+  it("exports fixed support categories without prompt-like provider errors or UI notices", () => {
+    const input = {
+      provider: "lmstudio" as const,
+      endpoint: "localhost:1234/private-prompt?prompt=secret",
       model: "qwen-local",
-      health: { status: "unavailable", endpoint: "http://localhost:1234/v1", latencyMs: 42, detail: "model unloaded\ncheck again", errorKind: "provider" },
+      health: { status: "unavailable" as const, endpoint: "http://localhost:1234/v1", latencyMs: 42, detail: "Provider echoed: SYSTEM PROMPT private user request", errorKind: "provider" as const },
       recovery,
       modelOptionsCount: 2,
-      modelNotice: "retry this model",
+      modelNotice: "Provider echoed: SYSTEM PROMPT private user request",
       retryAttempt: 1,
-    });
-    const serialized = serializeLocalDiagnostics({
-      provider: "lmstudio",
-      endpoint: "localhost:1234/v1?prompt=secret",
-      model: "qwen-local",
-      health: { status: "unavailable", endpoint: "http://localhost:1234/v1", latencyMs: 42, detail: "model unloaded\ncheck again", errorKind: "provider" },
-      recovery,
-      modelOptionsCount: 2,
-      modelNotice: "retry this model",
-      retryAttempt: 1,
-    });
+    };
+    const snapshot = buildLocalDiagnosticSnapshot(input);
+    const serialized = serializeLocalDiagnostics(input);
 
-    expect(snapshot.endpoint).toBe("http://localhost:1234/v1");
-    expect(snapshot.health?.detail).toBe("model unloaded check again");
+    expect(snapshot.endpoint).toBe("http://localhost:1234");
+    expect(snapshot.health?.category).toBe("provider-reported-error");
     expect(serialized).toContain('"promptContent": "excluded"');
+    expect(serialized).toContain('"modelNoticePresent": true');
     expect(serialized).not.toContain("prompt=secret");
+    expect(serialized).not.toContain("private-prompt");
     expect(serialized).not.toContain("secret");
-    expect(serialized).not.toContain("system prompt");
+    expect(serialized).not.toContain("SYSTEM PROMPT");
+    expect(serialized).not.toContain("private user request");
   });
 });
