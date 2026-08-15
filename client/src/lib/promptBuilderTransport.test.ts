@@ -79,6 +79,17 @@ describe("local completion response normalization", () => {
       expect((error as Error).message).toContain("selected model is loaded");
     }
   });
+
+  it("rejects non-standard custom JSON without treating arbitrary nested data as model output", () => {
+    expect(() => normalizeLocalCompletion({ data: { result: "untrusted custom shape" }, metadata: { provider: "custom" } })).toThrow("received keys: data, metadata");
+    try {
+      normalizeLocalCompletion({ error: { message: "local issue\nwith control characters", code: "custom_failure" } });
+      throw new Error("Expected a provider error");
+    } catch (error) {
+      expect((error as Error).message).toContain("local issue with control characters");
+      expect((error as Error).message).not.toContain("\n");
+    }
+  });
 });
 
 describe("local recovery actions", () => {
