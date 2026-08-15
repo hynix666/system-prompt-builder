@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertLocalEndpoint, ProviderError } from "./promptBuilderTransport";
+import { assertLocalEndpoint, localCorsGuidance, probeLocalServer, ProviderError } from "./promptBuilderTransport";
 
 describe("local provider endpoint policy", () => {
   it("accepts an explicitly local OpenAI-compatible endpoint", () => {
@@ -20,5 +20,20 @@ describe("local provider endpoint policy", () => {
   it("rejects local-looking inputs that include an unsafe URL component", () => {
     expect(() => assertLocalEndpoint("http://user:pass@localhost:11434/v1")).toThrow("must not include credentials");
     expect(() => assertLocalEndpoint("http://localhost:11434/v1?target=remote")).toThrow("must not include credentials");
+  });
+
+  it("probes a local model endpoint before discovery and reports its model count", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ id: "local-a" }, { id: "local-b" }] }), { status: 200 });
+    await expect(probeLocalServer("ollama", { baseUrl: "localhost:11434/v1", model: "" })).resolves.toMatchObject({ status: "healthy", modelCount: 2 });
+    globalThis.fetch = originalFetch;
+  });
+
+  it("returns a safe CORS-oriented failure state when a local endpoint cannot be reached", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => { throw new TypeError("Failed to fetch"); };
+    await expect(probeLocalServer("lmstudio", { baseUrl: "localhost:1234/v1", model: "" })).resolves.toMatchObject({ status: "unavailable", errorKind: "network" });
+    expect(localCorsGuidance("lmstudio")).toContain("CORS");
+    globalThis.fetch = originalFetch;
   });
 });

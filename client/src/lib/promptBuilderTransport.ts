@@ -1,5 +1,10 @@
 import type { LocalProviderConfig, LocalProviderId, ProviderResult } from "./promptBuilderTypes";
 
+export const LOCAL_PROVIDER_PRESETS: Record<LocalProviderId, LocalProviderConfig> = {
+  ollama: { baseUrl: "http://localhost:11434/v1", model: "" },
+  lmstudio: { baseUrl: "http://localhost:1234/v1", model: "" },
+};
+
 export class ProviderError extends Error {
   constructor(
     public readonly kind: "network" | "timeout" | "abort" | "http" | "parse" | "configuration",
@@ -10,6 +15,14 @@ export class ProviderError extends Error {
     this.name = "ProviderError";
   }
 }
+
+export type LocalServerHealth = {
+  status: "healthy" | "unavailable";
+  endpoint: string;
+  modelCount?: number;
+  detail: string;
+  errorKind?: ProviderError["kind"];
+};
 
 function normalizeLocalInput(value: string) {
   const trimmed = value.trim();
@@ -47,7 +60,7 @@ async function fetchWithTimeout(url: string, init: RequestInit, externalSignal?:
   const controller = new AbortController();
   const forwardAbort = () => controller.abort();
   externalSignal?.addEventListener("abort", forwardAbort, { once: true });
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  const timer = globalThis.setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, { ...init, signal: controller.signal });
     if (!response.ok) {
@@ -61,7 +74,7 @@ async function fetchWithTimeout(url: string, init: RequestInit, externalSignal?:
     if ((error as DOMException)?.name === "AbortError") throw new ProviderError("timeout", "The local model did not respond before the 90-second timeout.");
     throw new ProviderError("network", "Could not reach the local model. Check that it is running and its CORS policy permits this origin.");
   } finally {
-    window.clearTimeout(timer);
+    globalThis.clearTimeout(timer);
     externalSignal?.removeEventListener("abort", forwardAbort);
   }
 }
@@ -118,6 +131,25 @@ export async function listLocalModels(provider: LocalProviderId, cfg: LocalProvi
   return Array.isArray(data?.data)
     ? data.data.map((model: { id?: string }) => model.id).filter((model: unknown): model is string => typeof model === "string")
     : [];
+}
+
+export async function probeLocalServer(provider: LocalProviderId, cfg: LocalProviderConfig, signal?: AbortSignal): Promise<LocalServerHealth> {
+  void provider;
+  const baseUrl = assertLocalEndpoint(cfg.baseUrl);
+  try {
+    const response = await fetchWithTimeout(`${baseUrl}/models`, {}, signal, 8_000);
+    const data = await response.json().catch(() => ({}));
+    const modelCount = Array.isArray(data?.data) ? data.data.length : undefined;
+    return { status: "healthy", endpoint: baseUrl, modelCount, detail: modelCount === undefined ? "Local endpoint responded." : `${modelCount} local model${modelCount === 1 ? "" : "s"} reported.` };
+  } catch (error) {
+    const providerError = error instanceof ProviderError ? error : new ProviderError("network", "Could not reach the local model.");
+    return { status: "unavailable", endpoint: baseUrl, detail: providerError.message, errorKind: providerError.kind };
+  }
+}
+
+export function localCorsGuidance(provider: LocalProviderId) {
+  if (provider === "ollama") return "The browser could not reach Ollama. Confirm `ollama serve` is running and allow this app origin through Ollama's OLLAMA_ORIGINS setting before restarting Ollama.";
+  return "The browser could not reach LM Studio. Confirm the local server is started, then add this app origin to the server's CORS allowed origins in LM Studio before retrying.";
 }
 
 export function formatProviderError(error: unknown) {

@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { formatLint, lintPrompt } from "@/lib/promptLint";
 import { promptSummary, shortPromptHash, unifiedPromptDiff } from "@/lib/promptDiff";
-import { formatProviderError, callLocalOpenAICompatible, listLocalModels } from "@/lib/promptBuilderTransport";
+import { LOCAL_PROVIDER_PRESETS, ProviderError, formatProviderError, callLocalOpenAICompatible, listLocalModels, localCorsGuidance, probeLocalServer, type LocalServerHealth } from "@/lib/promptBuilderTransport";
 import { mockStageResponse, stageInstruction } from "@/lib/mockProvider";
 import { appendReferenceCitations } from "@/lib/referenceCitations";
 import { PromptDraftAudit } from "@/components/PromptDraftAudit";
@@ -233,6 +233,7 @@ export default function SystemPromptBuilderPipeline() {
     lmstudio: { model: "", baseUrl: "http://localhost:1234/v1" },
   });
   const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [localHealth, setLocalHealth] = useState<LocalServerHealth | null>(null);
   const [hostedModels, setHostedModels] = useState<Record<HostedProviderId, string>>({ openai: "", anthropic: "", gemini: "", compatible: "" });
   const [modelNotice, setModelNotice] = useState("");
   const [tokenBudget, setTokenBudget] = useState("2000");
@@ -281,7 +282,16 @@ export default function SystemPromptBuilderPipeline() {
 
   const updateConfig = (key: keyof LocalProviderConfig, value: string) => {
     if (!isLocalProvider(provider)) return;
+    setLocalHealth(null);
     setLocalConfigs((current) => ({ ...current, [provider]: { ...current[provider], [key]: value } }));
+  };
+
+  const applyLocalPreset = (localProvider: LocalProviderId) => {
+    setProvider(localProvider);
+    setLocalConfigs((current) => ({ ...current, [localProvider]: { ...LOCAL_PROVIDER_PRESETS[localProvider] } }));
+    setModelOptions([]);
+    setLocalHealth(null);
+    setModelNotice(`${localProvider === "ollama" ? "Ollama" : "LM Studio"} preset applied. Check the local server before discovery.`);
   };
 
   const activeHostedCapability = isHostedProvider(provider) ? hostedCapabilities.data?.find((capability) => capability.id === provider) : undefined;
@@ -340,6 +350,9 @@ export default function SystemPromptBuilderPipeline() {
       dispatch({ type: "result", stage: stageId, context: next, promptChanged, sources: attachedReferences.sources, output: { text: outputText, status: "done", usage, finishReason } });
       return next;
     } catch (error) {
+      if (isLocalProvider(provider) && error instanceof ProviderError && ["network", "timeout"].includes(error.kind)) {
+        setLocalHealth({ status: "unavailable", endpoint: localConfigs[provider].baseUrl, detail: error.message, errorKind: error.kind });
+      }
       dispatch({ type: "error", stage: stageId, message: formatProviderError(error) });
       throw error;
     }
@@ -388,9 +401,20 @@ export default function SystemPromptBuilderPipeline() {
     setRunning(false);
   };
 
-  const fetchModels = async () => {
+  const checkLocalServer = async (discoverModels: boolean) => {
     if (!isLocalProvider(provider)) return;
     setModelNotice("Checking local server…");
+    const health = await probeLocalServer(provider, localConfigs[provider]);
+    setLocalHealth(health);
+    if (health.status !== "healthy") {
+      setModelOptions([]);
+      setModelNotice(health.detail);
+      return;
+    }
+    if (!discoverModels) {
+      setModelNotice(`${health.detail} Model discovery is ready.`);
+      return;
+    }
     try {
       const models = await listLocalModels(provider, localConfigs[provider]);
       setModelOptions(models);
@@ -400,6 +424,8 @@ export default function SystemPromptBuilderPipeline() {
       setModelNotice(formatProviderError(error));
     }
   };
+
+  const fetchModels = async () => checkLocalServer(true);
 
   const copyPrompt = async () => {
     if (!state.context.prompt) return;
@@ -453,7 +479,7 @@ export default function SystemPromptBuilderPipeline() {
             <p className="sl-section-label">02 / PROVIDER</p>
             <div className="sl-choice-grid" role="radiogroup" aria-label="Local model provider">
               {(["mock", "ollama", "lmstudio"] as ProviderId[]).map((id) => (
-                <button key={id} className={`sl-choice ${provider === id ? "is-selected" : ""}`} role="radio" aria-checked={provider === id} onClick={() => { setProvider(id); setModelOptions([]); setModelNotice(""); }}>
+                <button key={id} className={`sl-choice ${provider === id ? "is-selected" : ""}`} role="radio" aria-checked={provider === id} onClick={() => { setProvider(id); setModelOptions([]); setModelNotice(""); setLocalHealth(null); }}>
                   {id === "mock" ? "DEMO" : id === "ollama" ? "OLLAMA" : "LM STUDIO"}
                 </button>
               ))}
@@ -472,10 +498,13 @@ export default function SystemPromptBuilderPipeline() {
             </div>
             {provider === "mock" ? <p className="sl-field-note"><FlaskConical size={13} /> Local sample outputs only. No network request.</p> : isLocalProvider(provider) ? (
               <div className="sl-provider-fields">
+                <div className="sl-proof-actions"><Button tone="paper" onClick={() => applyLocalPreset("ollama")}>USE OLLAMA PRESET</Button><Button tone="paper" onClick={() => applyLocalPreset("lmstudio")}>USE LM STUDIO PRESET</Button></div>
                 <label>LOCAL ENDPOINT<input value={localConfigs[provider].baseUrl} onChange={(event) => updateConfig("baseUrl", event.target.value)} placeholder="localhost:11434/v1 or http://localhost:11434/v1" /></label>
                 <label>MODEL<input list="local-models" value={localConfigs[provider].model} onChange={(event) => updateConfig("model", event.target.value)} placeholder="choose a loaded local model" /></label>
                 <datalist id="local-models">{modelOptions.map((model) => <option value={model} key={model} />)}</datalist>
-                <Button tone="paper" onClick={() => void fetchModels}><RotateCcw size={13} /> DISCOVER LOCAL MODELS</Button>
+                <div className="sl-proof-actions"><Button tone="paper" onClick={() => void checkLocalServer(false)}><ShieldCheck size={13} /> CHECK LOCAL SERVER</Button><Button tone="paper" onClick={() => void fetchModels}><RotateCcw size={13} /> DISCOVER LOCAL MODELS</Button></div>
+                {localHealth && <p className="sl-field-note">{localHealth.status === "healthy" ? <ShieldCheck size={13} /> : <AlertTriangle size={13} />} LOCAL HEALTH: {localHealth.detail}</p>}
+                {localHealth?.status === "unavailable" && (localHealth.errorKind === "network" || localHealth.errorKind === "timeout") && <div className="sl-field-note" role="alert"><AlertTriangle size={13} /> <strong>CORS TROUBLESHOOTING:</strong> {localCorsGuidance(provider)} <code>{window.location.origin}</code></div>}
                 {modelNotice && <p className="sl-field-note">{modelNotice}</p>}
               </div>
             ) : !isAuthenticated ? <div className="sl-provider-fields"><p className="sl-field-note"><LockKeyhole size={13} /> Sign in to use the server-side hosted provider adapter.</p><Button tone="paper" onClick={startLogin}>SIGN IN</Button></div> : hostedCapabilities.isLoading || hostedHealth.isLoading ? <p className="sl-field-note"><span className="sl-spinner" /> Checking server provider access and model health…</p> : !activeHostedCapability?.available || activeHostedHealth?.status !== "healthy" ? <div className="sl-provider-fields"><p className="sl-field-note"><AlertTriangle size={13} /> {activeHostedHealth?.detail ?? activeHostedCapability?.reason ?? "This hosted provider is not configured on the server."}</p><p className="sl-field-note">Last checked: {activeHostedHealth ? new Date(activeHostedHealth.checkedAt).toLocaleTimeString() : "not yet checked"}. Provider credentials and endpoints remain server-only.</p><Button tone="paper" onClick={refreshHostedHealth} disabled={hostedHealth.isFetching}><RotateCcw size={13} /> {hostedHealth.isFetching ? "CHECKING" : "CHECK NOW"}</Button></div> : (
