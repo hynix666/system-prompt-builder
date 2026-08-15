@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { Check, Eye, FileText, FolderOpen, Info, Loader2, LogIn, Paperclip, Quote, Trash2, Upload, X } from "lucide-react";
+import { Check, Eye, FileText, FolderOpen, Info, Loader2, LogIn, Paperclip, Quote, Search, Trash2, Upload, X } from "lucide-react";
 import { startLogin } from "@/const";
 import { useAuth } from "@/_core/hooks/useAuth";
 import { trpc } from "@/lib/trpc";
@@ -34,6 +34,8 @@ export type AttachedReferenceContext = {
 
 type PreparedSource = AttachedReferenceContext["sources"][number] & { preview: string };
 type PreparedContext = { sources: PreparedSource[]; totalBudget: number };
+type SearchResult = { id: number; originalName: string; matches: Array<{ excerpt: string; offset: number }> };
+type SearchResponse = { query: string; results: SearchResult[]; totalMatches: number };
 
 export function PromptReferenceVault({ onContextChange }: { onContextChange: (value: AttachedReferenceContext) => void }) {
   const { isAuthenticated, loading } = useAuth();
@@ -44,6 +46,8 @@ export function PromptReferenceVault({ onContextChange }: { onContextChange: (va
   const [budgets, setBudgets] = useState<Record<number, number>>({});
   const [prepared, setPrepared] = useState<PreparedContext | null>(null);
   const [activePreviewId, setActivePreviewId] = useState<number | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchResponse | null>(null);
 
   const assets = trpc.assets.list.useQuery(undefined, { enabled: isAuthenticated });
   const upload = trpc.assets.upload.useMutation({
@@ -67,7 +71,7 @@ export function PromptReferenceVault({ onContextChange }: { onContextChange: (va
   const previewContext = trpc.assets.previewContext.useMutation({
     onSuccess: (value) => {
       setPrepared(value);
-      setActivePreviewId(value.sources[0]?.id ?? null);
+      setActivePreviewId((current) => current && value.sources.some((source) => source.id === current) ? current : value.sources[0]?.id ?? null);
       setNotice("Review the extracted excerpts, then attach the sources to the next compile run.");
     },
     onError: (error) => setNotice(error.message),
@@ -81,6 +85,10 @@ export function PromptReferenceVault({ onContextChange }: { onContextChange: (va
     },
     onError: (error) => setNotice(error.message),
   });
+  const referenceSearch = trpc.assets.search.useMutation({
+    onSuccess: (value) => setSearchResults(value),
+    onError: (error) => setNotice(error.message),
+  });
 
   const selection = useMemo(
     () => selected.map((assetId) => ({ assetId, tokenBudget: budgets[assetId] ?? DEFAULT_REFERENCE_TOKENS })),
@@ -92,6 +100,7 @@ export function PromptReferenceVault({ onContextChange }: { onContextChange: (va
   const clearPrepared = () => {
     setPrepared(null);
     setActivePreviewId(null);
+    setSearchResults(null);
     onContextChange({ context: "", sources: [] });
     setNotice("");
   };
@@ -109,6 +118,12 @@ export function PromptReferenceVault({ onContextChange }: { onContextChange: (va
     const tokenBudget = Math.max(MIN_REFERENCE_TOKENS, Math.min(MAX_REFERENCE_TOKENS, Number(rawValue.replace(/\D/g, "")) || MIN_REFERENCE_TOKENS));
     setBudgets((current) => ({ ...current, [id]: tokenBudget }));
     clearPrepared();
+  };
+
+  const openSearchResult = (assetId: number) => {
+    setActivePreviewId(assetId);
+    if (prepared) return;
+    previewContext.mutate({ sources: selection });
   };
 
   const handleFile = async (file: File | undefined) => {
@@ -156,6 +171,21 @@ export function PromptReferenceVault({ onContextChange }: { onContextChange: (va
               </li>)}
             </ul>
             {selected.length > 0 && <p className="sl-reference-total">{selected.length} source{selected.length === 1 ? "" : "s"} / {totalBudget} of {MAX_TOTAL_TOKENS} input tokens</p>}
+            {selected.length > 0 && <section className="sl-reference-search" aria-labelledby="reference-search-title">
+              <p className="sl-section-label" id="reference-search-title">FULL-DOCUMENT SEARCH / SELECTED SOURCES</p>
+              <div className="sl-reference-search-controls">
+                <input aria-label="Search the full text of selected private references" value={searchQuery} onChange={(event) => { setSearchQuery(event.target.value); setSearchResults(null); }} onKeyDown={(event) => { if (event.key === "Enter" && searchQuery.trim().length >= 2) referenceSearch.mutate({ assetIds: selected, query: searchQuery.trim() }); }} placeholder="Find a phrase in selected sources" />
+                <button type="button" disabled={searchQuery.trim().length < 2 || referenceSearch.isPending} onClick={() => referenceSearch.mutate({ assetIds: selected, query: searchQuery.trim() })}><Search size={12} /> {referenceSearch.isPending ? "SEARCHING" : "SEARCH"}</button>
+              </div>
+              <p className="sl-reference-search-note">Search runs server-side against the complete extracted text of your selected private sources.</p>
+              {searchResults && <div className="sl-reference-search-results" role="status">
+                <p>{searchResults.totalMatches ? `${searchResults.totalMatches} match${searchResults.totalMatches === 1 ? "" : "es"} for “${searchResults.query}”` : `No matches for “${searchResults.query}”.`}</p>
+                {searchResults.results.map((result) => <article key={result.id}>
+                  <header><strong>{result.originalName}</strong><button type="button" onClick={() => openSearchResult(result.id)}>OPEN IN PREVIEW</button></header>
+                  {result.matches.map((match) => <pre key={`${result.id}-${match.offset}`}>{match.excerpt}</pre>)}
+                </article>)}
+              </div>}
+            </section>}
             <button className="sl-reference-preview" type="button" disabled={!selected.length || totalBudget > MAX_TOTAL_TOKENS || previewContext.isPending} onClick={() => previewContext.mutate({ sources: selection })}><Eye size={13} /> {previewContext.isPending ? "READING SOURCES" : "PREVIEW EXCERPTS"}</button>
             {prepared && activePreview && <section className="sl-reference-preview-panel" aria-labelledby="reference-preview-title">
               <div className="sl-reference-preview-head">

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildReferenceContext, clipReferenceText, normalizeReferenceText } from "./referenceContext";
+import { buildReferenceContext, clipReferenceText, findReferenceSearchMatches, normalizeReferenceText } from "./referenceContext";
 
 describe("reference compilation context", () => {
   it("normalizes source text and marks it as untrusted factual material", () => {
@@ -16,5 +16,12 @@ describe("reference compilation context", () => {
     const clipped = clipReferenceText("abcdefghij", 5);
     expect(clipped).toContain("a");
     expect(clipped).toContain("truncated");
+  });
+
+  it("finds bounded, contextual matches across the complete extracted text", () => {
+    const matches = findReferenceSearchMatches("First release milestone. A second RELEASE milestone. A third release milestone. A fourth release milestone.", "release");
+    expect(matches).toHaveLength(3);
+    expect(matches[0]?.excerpt).toContain("release milestone");
+    expect(matches[0]?.offset).toBe(6);
   });
 });

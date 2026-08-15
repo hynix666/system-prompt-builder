@@ -6,6 +6,8 @@ export const DEFAULT_REFERENCE_TOKENS = 500;
 export const MAX_REFERENCE_TOKENS_PER_FILE = 1_200;
 export const MAX_REFERENCE_TOKENS_TOTAL = 2_400;
 export const PREVIEW_REFERENCE_CHARS = 600;
+export const MAX_SEARCH_MATCHES_PER_REFERENCE = 3;
+export const SEARCH_RESULT_CONTEXT_CHARS = 260;
 
 export type ExtractableReference = {
   originalName: string;
@@ -71,4 +73,23 @@ export function buildReferenceContext(references: CompiledReference[]) {
 
 export function createReferencePreview(text: string) {
   return clipReferenceText(text, PREVIEW_REFERENCE_CHARS);
+}
+
+export function findReferenceSearchMatches(text: string, query: string) {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  if (!normalizedQuery) return [];
+  const normalizedText = text.toLocaleLowerCase();
+  const matches: Array<{ excerpt: string; offset: number }> = [];
+  let from = 0;
+
+  while (matches.length < MAX_SEARCH_MATCHES_PER_REFERENCE) {
+    const offset = normalizedText.indexOf(normalizedQuery, from);
+    if (offset < 0) break;
+    const before = Math.max(0, offset - Math.floor(SEARCH_RESULT_CONTEXT_CHARS / 2));
+    const after = Math.min(text.length, offset + normalizedQuery.length + Math.ceil(SEARCH_RESULT_CONTEXT_CHARS / 2));
+    const excerpt = `${before > 0 ? "…" : ""}${text.slice(before, after)}${after < text.length ? "…" : ""}`;
+    matches.push({ excerpt, offset });
+    from = offset + normalizedQuery.length;
+  }
+  return matches;
 }

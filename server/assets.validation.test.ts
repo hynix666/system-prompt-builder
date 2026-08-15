@@ -44,4 +44,9 @@ describe("assets validation", () => {
     const caller = appRouter.createCaller(authenticatedContext());
     await expect(caller.assets.previewContext({ sources: [{ assetId: 1, tokenBudget: 1200 }, { assetId: 2, tokenBudget: 1200 }, { assetId: 3, tokenBudget: 100 }] })).rejects.toMatchObject({ code: "BAD_REQUEST" });
   });
+
+  it("requires a meaningful search phrase before reading private source documents", async () => {
+    const caller = appRouter.createCaller(authenticatedContext());
+    await expect(caller.assets.search({ assetIds: [1], query: "x" })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
 });
