@@ -1,9 +1,11 @@
 import http from "node:http";
+import { readFile } from "node:fs/promises";
 import { chromium } from "playwright-core";
 
 const APP_URL = process.env.LOCAL_PROVIDER_UI_APP_URL ?? "http://127.0.0.1:3000";
 const HEALTH_PORT = 43123;
 const CORS_PORT = 43124;
+const LM_PORT = 43125;
 
 function pause(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -55,6 +57,27 @@ async function run() {
     response.end();
   });
 
+  let lmGenerationCalls = 0;
+  const lmServer = await startServer(LM_PORT, async (request, response) => {
+    if (request.method === "OPTIONS") {
+      response.writeHead(204, {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+      });
+      response.end();
+      return;
+    }
+    if (request.url === "/v1/models") return json(response, { data: [{ id: "lm-studio-local" }] }, { cors: true });
+    if (request.url === "/v1/chat/completions" && request.method === "POST") {
+      lmGenerationCalls += 1;
+      if (lmGenerationCalls === 1) return json(response, { error: { code: "model_not_loaded", message: "model not loaded in memory" } }, { cors: true });
+      return json(response, { choices: [{ message: { content: "LM Studio retry output" }, finish_reason: "stop" }] }, { cors: true });
+    }
+    response.writeHead(404, { "Access-Control-Allow-Origin": "*" });
+    response.end();
+  });
+
   const browser = await chromium.launch({ executablePath: "/usr/bin/chromium", headless: true, args: ["--no-sandbox"] });
   const page = await browser.newPage();
 
@@ -93,12 +116,42 @@ async function run() {
     await page.getByText(/Ollama browser access — setup guide/).click();
     await page.getByText(/OLLAMA_ORIGINS=/).waitFor();
 
+    await page.reload({ waitUntil: "networkidle" });
+    await page.getByRole("radio", { name: "LM STUDIO" }).click();
+    await page.getByLabel("LOCAL ENDPOINT").fill(`http://127.0.0.1:${LM_PORT}/v1`);
+    await page.getByRole("combobox", { name: "MODEL" }).fill("lm-studio-local");
+    await page.getByRole("button", { name: "CHECK LOCAL SERVER" }).click();
+    await page.getByText(/LOCAL HEALTH:/).waitFor();
+    const firstLmResponse = page.waitForResponse((response) => response.url() === `http://127.0.0.1:${LM_PORT}/v1/chat/completions` && response.request().method() === "POST", { timeout: 5_000 });
+    await page.getByRole("button", { name: "RUN THIS" }).click();
+    await firstLmResponse;
+    await page.getByRole("button", { name: "SHOW RELOAD STEPS" }).click();
+    const retryResponse = page.waitForResponse((response) => response.url() === `http://127.0.0.1:${LM_PORT}/v1/chat/completions` && response.request().method() === "POST", { timeout: 5_000 });
+    await page.getByRole("button", { name: "RETRY AFTER RELOAD" }).click();
+    await retryResponse;
+    await page.waitForTimeout(500);
+    const retryText = await page.locator("body").innerText();
+    if (!retryText.includes("LM Studio retry output") || !retryText.includes("Retry succeeded after the local model reload.")) {
+      throw new Error(`Expected LM Studio retry success. Rendered page text: ${retryText.slice(0, 1800)}`);
+    }
+
+    const diagnosticDownload = page.waitForEvent("download", { timeout: 5_000 });
+    await page.getByRole("button", { name: "SUPPORT LOG" }).click();
+    const diagnosticFile = await diagnosticDownload;
+    const diagnosticPath = await diagnosticFile.path();
+    if (!diagnosticPath) throw new Error("Expected a redacted diagnostic download path.");
+    const diagnosticText = await readFile(diagnosticPath, "utf8");
+    if (!diagnosticText.includes('"promptContent": "excluded"') || diagnosticText.includes("system prompt")) {
+      throw new Error(`Diagnostic export was not redacted as expected: ${diagnosticText.slice(0, 1400)}`);
+    }
+
     await page.screenshot({ path: "/home/ubuntu/local-provider-ui.integration.png", fullPage: true });
-    console.log("Local provider UI integration: passed (health latency, discovery, generation, CORS guide).");
+    console.log("Local provider UI integration: passed (Ollama latency/discovery/generation/CORS guide and LM Studio reload retry).");
   } finally {
     await browser.close();
     await new Promise((resolve) => healthyServer.close(resolve));
     await new Promise((resolve) => corsServer.close(resolve));
+    await new Promise((resolve) => lmServer.close(resolve));
   }
 }
 
