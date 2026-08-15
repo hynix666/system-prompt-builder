@@ -24,7 +24,8 @@ import {
 } from "lucide-react";
 import { formatLint, lintPrompt } from "@/lib/promptLint";
 import { promptSummary, shortPromptHash, unifiedPromptDiff } from "@/lib/promptDiff";
-import { LOCAL_PROVIDER_PRESETS, ProviderError, formatProviderError, callLocalOpenAICompatible, listLocalModels, localCorsGuidance, probeLocalServer, type LocalServerHealth } from "@/lib/promptBuilderTransport";
+import { LOCAL_PROVIDER_PRESETS, ProviderError, formatProviderError, callLocalOpenAICompatible, listLocalModels, localCorsGuidance, localCorsSetupGuide, probeLocalServer, type LocalServerHealth } from "@/lib/promptBuilderTransport";
+import { LOCAL_MODEL_MEMORY_KEY, parseLocalModelMemory, rememberLocalModel, type LocalModelMemory } from "@/lib/localModelMemory";
 import { mockStageResponse, stageInstruction } from "@/lib/mockProvider";
 import { appendReferenceCitations } from "@/lib/referenceCitations";
 import { PromptDraftAudit } from "@/components/PromptDraftAudit";
@@ -57,6 +58,21 @@ const SAND = "#E8DEC9";
 const DEFAULT_BRIEF =
   "A support assistant for a small indie video-game studio. Helps players troubleshoot bugs, explains confirmed features, stays friendly and a little playful, never promises unreleased features, and escalates refund requests to a human.";
 const DEFAULT_TEST = "My game crashes every time I open the map. What do I do?";
+
+function readLastSuccessfulLocalModels(): LocalModelMemory {
+  try {
+    return parseLocalModelMemory(window.localStorage.getItem(LOCAL_MODEL_MEMORY_KEY));
+  } catch {
+    return { ollama: "", lmstudio: "" };
+  }
+}
+
+function initialLocalConfigs(lastSuccessfulModels: LocalModelMemory): Record<LocalProviderId, LocalProviderConfig> {
+  return {
+    ollama: { ...LOCAL_PROVIDER_PRESETS.ollama, model: lastSuccessfulModels.ollama },
+    lmstudio: { ...LOCAL_PROVIDER_PRESETS.lmstudio, model: lastSuccessfulModels.lmstudio },
+  };
+}
 
 type StageDefinition = {
   id: StageId;
@@ -228,10 +244,8 @@ export default function SystemPromptBuilderPipeline() {
   const [testMessage, setTestMessage] = useState(DEFAULT_TEST);
   const [stakes, setStakes] = useState<Stakes>("MEDIUM");
   const [provider, setProvider] = useState<ProviderId>("mock");
-  const [localConfigs, setLocalConfigs] = useState<Record<LocalProviderId, LocalProviderConfig>>({
-    ollama: { model: "", baseUrl: "http://localhost:11434/v1" },
-    lmstudio: { model: "", baseUrl: "http://localhost:1234/v1" },
-  });
+  const [lastSuccessfulModels, setLastSuccessfulModels] = useState<LocalModelMemory>(readLastSuccessfulLocalModels);
+  const [localConfigs, setLocalConfigs] = useState<Record<LocalProviderId, LocalProviderConfig>>(() => initialLocalConfigs(readLastSuccessfulLocalModels()));
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [localHealth, setLocalHealth] = useState<LocalServerHealth | null>(null);
   const [hostedModels, setHostedModels] = useState<Record<HostedProviderId, string>>({ openai: "", anthropic: "", gemini: "", compatible: "" });
@@ -259,10 +273,16 @@ export default function SystemPromptBuilderPipeline() {
   const finalVerdict = deriveVerdict(state, stakes);
   const canSave = finalVerdict === "PASS";
   const comparisonDiff = useMemo(() => (comparison ? unifiedPromptDiff(comparison.prompt, state.context.prompt) : []), [comparison, state.context.prompt]);
+  const localOrigin = typeof window === "undefined" ? "this app origin" : window.location.origin;
+  const activeLocalSetupGuide = isLocalProvider(provider) ? localCorsSetupGuide(provider, localOrigin) : null;
 
   useEffect(() => {
     window.localStorage.setItem("signal-ledger-vault-v1", JSON.stringify(saved.slice(0, 20)));
   }, [saved]);
+
+  useEffect(() => {
+    window.localStorage.setItem(LOCAL_MODEL_MEMORY_KEY, JSON.stringify(lastSuccessfulModels));
+  }, [lastSuccessfulModels]);
 
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
@@ -288,10 +308,22 @@ export default function SystemPromptBuilderPipeline() {
 
   const applyLocalPreset = (localProvider: LocalProviderId) => {
     setProvider(localProvider);
-    setLocalConfigs((current) => ({ ...current, [localProvider]: { ...LOCAL_PROVIDER_PRESETS[localProvider] } }));
+    setLocalConfigs((current) => ({ ...current, [localProvider]: { ...LOCAL_PROVIDER_PRESETS[localProvider], model: lastSuccessfulModels[localProvider] } }));
     setModelOptions([]);
     setLocalHealth(null);
-    setModelNotice(`${localProvider === "ollama" ? "Ollama" : "LM Studio"} preset applied. Check the local server before discovery.`);
+    setModelNotice(`${localProvider === "ollama" ? "Ollama" : "LM Studio"} preset applied.${lastSuccessfulModels[localProvider] ? ` Restored last successful model: ${lastSuccessfulModels[localProvider]}.` : " Check the local server before discovery."}`);
+  };
+
+  const selectLocalProvider = (localProvider: LocalProviderId) => {
+    setProvider(localProvider);
+    setLocalConfigs((current) => current[localProvider].model || !lastSuccessfulModels[localProvider] ? current : { ...current, [localProvider]: { ...current[localProvider], model: lastSuccessfulModels[localProvider] } });
+    setModelOptions([]);
+    setModelNotice("");
+    setLocalHealth(null);
+  };
+
+  const rememberSuccessfulLocalModel = (localProvider: LocalProviderId, model: string) => {
+    setLastSuccessfulModels((current) => rememberLocalModel(current, localProvider, model));
   };
 
   const activeHostedCapability = isHostedProvider(provider) ? hostedCapabilities.data?.find((capability) => capability.id === provider) : undefined;
@@ -330,6 +362,7 @@ export default function SystemPromptBuilderPipeline() {
           : isLocalProvider(provider)
             ? await callLocalOpenAICompatible(provider, localConfigs[provider], systemPrompt, instruction, signal)
             : await hostedGenerate.mutateAsync({ provider, model: hostedModels[provider], system: systemPrompt, user: instruction, temperature: 0.2 });
+        if (isLocalProvider(provider)) rememberSuccessfulLocalModel(provider, localConfigs[provider].model);
         outputText = result.text;
         usage = result.usage;
         finishReason = result.finishReason;
@@ -418,6 +451,10 @@ export default function SystemPromptBuilderPipeline() {
     try {
       const models = await listLocalModels(provider, localConfigs[provider]);
       setModelOptions(models);
+      const rememberedModel = lastSuccessfulModels[provider];
+      if (rememberedModel && models.includes(rememberedModel)) {
+        setLocalConfigs((current) => ({ ...current, [provider]: { ...current[provider], model: rememberedModel } }));
+      }
       setModelNotice(models.length ? `${models.length} local model${models.length === 1 ? "" : "s"} available.` : "No models were reported by this local server.");
     } catch (error) {
       setModelOptions([]);
@@ -452,7 +489,7 @@ export default function SystemPromptBuilderPipeline() {
 
   return (
     <div className="sl-app">
-      <style>{styles + auditStyles + referenceVaultStyles + referencePreviewStyles + referenceSearchStyles}</style>
+      <style>{styles + auditStyles + referenceVaultStyles + referencePreviewStyles + referenceSearchStyles + localSetupStyles}</style>
       <header className="sl-header">
         <div className="sl-header-rule" />
         <div className="sl-brand">
@@ -478,8 +515,8 @@ export default function SystemPromptBuilderPipeline() {
           <section className="sl-control-section">
             <p className="sl-section-label">02 / PROVIDER</p>
             <div className="sl-choice-grid" role="radiogroup" aria-label="Local model provider">
-              {(["mock", "ollama", "lmstudio"] as ProviderId[]).map((id) => (
-                <button key={id} className={`sl-choice ${provider === id ? "is-selected" : ""}`} role="radio" aria-checked={provider === id} onClick={() => { setProvider(id); setModelOptions([]); setModelNotice(""); setLocalHealth(null); }}>
+              {(["mock", "ollama", "lmstudio"] as const).map((id) => (
+                <button key={id} className={`sl-choice ${provider === id ? "is-selected" : ""}`} role="radio" aria-checked={provider === id} onClick={() => id === "mock" ? (setProvider(id), setModelOptions([]), setModelNotice(""), setLocalHealth(null)) : selectLocalProvider(id)}>
                   {id === "mock" ? "DEMO" : id === "ollama" ? "OLLAMA" : "LM STUDIO"}
                 </button>
               ))}
@@ -503,8 +540,10 @@ export default function SystemPromptBuilderPipeline() {
                 <label>MODEL<input list="local-models" value={localConfigs[provider].model} onChange={(event) => updateConfig("model", event.target.value)} placeholder="choose a loaded local model" /></label>
                 <datalist id="local-models">{modelOptions.map((model) => <option value={model} key={model} />)}</datalist>
                 <div className="sl-proof-actions"><Button tone="paper" onClick={() => void checkLocalServer(false)}><ShieldCheck size={13} /> CHECK LOCAL SERVER</Button><Button tone="paper" onClick={() => void fetchModels}><RotateCcw size={13} /> DISCOVER LOCAL MODELS</Button></div>
-                {localHealth && <p className="sl-field-note">{localHealth.status === "healthy" ? <ShieldCheck size={13} /> : <AlertTriangle size={13} />} LOCAL HEALTH: {localHealth.detail}</p>}
-                {localHealth?.status === "unavailable" && (localHealth.errorKind === "network" || localHealth.errorKind === "timeout") && <div className="sl-field-note" role="alert"><AlertTriangle size={13} /> <strong>CORS TROUBLESHOOTING:</strong> {localCorsGuidance(provider)} <code>{window.location.origin}</code></div>}
+                {lastSuccessfulModels[provider] && <p className="sl-field-note"><Check size={13} /> LAST SUCCESSFUL MODEL: <strong>{lastSuccessfulModels[provider]}</strong> — restored automatically for this provider.</p>}
+                {localHealth && <p className="sl-field-note">{localHealth.status === "healthy" ? <ShieldCheck size={13} /> : <AlertTriangle size={13} />} LOCAL HEALTH: {localHealth.detail}{typeof localHealth.latencyMs === "number" ? ` Response: ${localHealth.latencyMs} ms.` : ""}</p>}
+                {localHealth?.status === "unavailable" && (localHealth.errorKind === "network" || localHealth.errorKind === "timeout") && <div className="sl-field-note" role="alert"><AlertTriangle size={13} /> <strong>CORS TROUBLESHOOTING:</strong> {localCorsGuidance(provider)} <code>{localOrigin}</code></div>}
+                {activeLocalSetupGuide && <details className="sl-local-setup"><summary>{activeLocalSetupGuide.title} — setup guide</summary><ol>{activeLocalSetupGuide.steps.map((step) => <li key={step}>{step}</li>)}</ol><code>{activeLocalSetupGuide.command}</code><p>{activeLocalSetupGuide.note} <a href={activeLocalSetupGuide.docsUrl} target="_blank" rel="noreferrer">Open official instructions</a>.</p></details>}
                 {modelNotice && <p className="sl-field-note">{modelNotice}</p>}
               </div>
             ) : !isAuthenticated ? <div className="sl-provider-fields"><p className="sl-field-note"><LockKeyhole size={13} /> Sign in to use the server-side hosted provider adapter.</p><Button tone="paper" onClick={startLogin}>SIGN IN</Button></div> : hostedCapabilities.isLoading || hostedHealth.isLoading ? <p className="sl-field-note"><span className="sl-spinner" /> Checking server provider access and model health…</p> : !activeHostedCapability?.available || activeHostedHealth?.status !== "healthy" ? <div className="sl-provider-fields"><p className="sl-field-note"><AlertTriangle size={13} /> {activeHostedHealth?.detail ?? activeHostedCapability?.reason ?? "This hosted provider is not configured on the server."}</p><p className="sl-field-note">Last checked: {activeHostedHealth ? new Date(activeHostedHealth.checkedAt).toLocaleTimeString() : "not yet checked"}. Provider credentials and endpoints remain server-only.</p><Button tone="paper" onClick={refreshHostedHealth} disabled={hostedHealth.isFetching}><RotateCcw size={13} /> {hostedHealth.isFetching ? "CHECKING" : "CHECK NOW"}</Button></div> : (
@@ -625,4 +664,8 @@ const referencePreviewStyles = `
 
 const referenceSearchStyles = `
   .sl-reference-search{margin-top:12px;border-top:1px solid #c7bba8;padding-top:9px}.sl-reference-search-controls{display:flex;gap:5px;margin-top:6px}.sl-reference-search-controls input{min-width:0;flex:1;border:1px solid #bcb29f;background:#fffdf7;padding:7px;color:var(--ink);font-size:8px;outline:none}.sl-reference-search-controls input:focus{border-color:var(--blue);box-shadow:0 0 0 2px rgba(23,92,255,.12)}.sl-reference-search-controls button{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--blue);background:var(--blue);padding:6px 7px;color:#fff;font-size:8px;letter-spacing:.05em;cursor:pointer}.sl-reference-search-controls button:disabled{opacity:.55;cursor:not-allowed}.sl-reference-search-note{margin:6px 0 0;color:#70736f;font-size:7px;line-height:1.4}.sl-reference-search-results{display:grid;gap:7px;margin-top:9px}.sl-reference-search-results>p{margin:0;color:#3c4e68;font-size:8px}.sl-reference-search-results article{border:1px solid #d4cab9;background:#fffdf7}.sl-reference-search-results header{display:flex;align-items:center;justify-content:space-between;gap:7px;padding:6px 7px;color:#3c4651;font-size:8px}.sl-reference-search-results header strong{overflow:hidden;max-width:150px;text-overflow:ellipsis;white-space:nowrap}.sl-reference-search-results header button{border:0;background:transparent;padding:0;color:var(--blue);font-size:7px;letter-spacing:.04em;cursor:pointer}.sl-reference-search-results pre{max-height:100px;overflow:auto;margin:0;border-top:1px solid #e1d8ca;padding:7px;white-space:pre-wrap;color:#505b65;font:8px/1.55 "DM Mono",monospace}.sl-reference-search-results button:focus-visible,.sl-reference-search-controls button:focus-visible{outline:2px solid var(--blue);outline-offset:2px}@media (max-width:760px){.sl-reference-search-controls{align-items:stretch;flex-direction:column}.sl-reference-search-controls button{justify-content:center}.sl-reference-search-results header strong{max-width:170px}}
+`;
+
+const localSetupStyles = `
+  .sl-local-setup{margin-top:3px;border:1px solid #d2c7b5;background:rgba(255,253,247,.68);color:#4b5560;font-size:9px;line-height:1.5}.sl-local-setup summary{padding:7px 8px;color:#26384f;font-size:8px;letter-spacing:.055em;cursor:pointer}.sl-local-setup summary:focus-visible{outline:2px solid var(--blue);outline-offset:2px}.sl-local-setup ol{display:grid;gap:3px;margin:0;padding:0 10px 7px 25px}.sl-local-setup code{display:block;overflow:auto;margin:0 8px;padding:6px;border-left:2px solid var(--blue);background:#f1ebdf;color:#243446;font-size:8px;white-space:nowrap}.sl-local-setup p{margin:7px 8px 8px;color:#5d646b;font-size:8px}.sl-local-setup a{color:var(--blue);font-weight:600}@media (max-width:760px){.sl-local-setup code{white-space:normal;word-break:break-word}}
 `;

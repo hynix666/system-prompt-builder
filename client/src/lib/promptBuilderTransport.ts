@@ -20,8 +20,17 @@ export type LocalServerHealth = {
   status: "healthy" | "unavailable";
   endpoint: string;
   modelCount?: number;
+  latencyMs?: number;
   detail: string;
   errorKind?: ProviderError["kind"];
+};
+
+export type LocalCorsSetupGuide = {
+  title: string;
+  steps: string[];
+  command: string;
+  note: string;
+  docsUrl: string;
 };
 
 function normalizeLocalInput(value: string) {
@@ -136,20 +145,42 @@ export async function listLocalModels(provider: LocalProviderId, cfg: LocalProvi
 export async function probeLocalServer(provider: LocalProviderId, cfg: LocalProviderConfig, signal?: AbortSignal): Promise<LocalServerHealth> {
   void provider;
   const baseUrl = assertLocalEndpoint(cfg.baseUrl);
+  const startedAt = globalThis.performance?.now?.() ?? Date.now();
   try {
     const response = await fetchWithTimeout(`${baseUrl}/models`, {}, signal, 8_000);
     const data = await response.json().catch(() => ({}));
     const modelCount = Array.isArray(data?.data) ? data.data.length : undefined;
-    return { status: "healthy", endpoint: baseUrl, modelCount, detail: modelCount === undefined ? "Local endpoint responded." : `${modelCount} local model${modelCount === 1 ? "" : "s"} reported.` };
+    const latencyMs = Math.max(0, Math.round((globalThis.performance?.now?.() ?? Date.now()) - startedAt));
+    return { status: "healthy", endpoint: baseUrl, modelCount, latencyMs, detail: modelCount === undefined ? "Local endpoint responded." : `${modelCount} local model${modelCount === 1 ? "" : "s"} reported.` };
   } catch (error) {
     const providerError = error instanceof ProviderError ? error : new ProviderError("network", "Could not reach the local model.");
-    return { status: "unavailable", endpoint: baseUrl, detail: providerError.message, errorKind: providerError.kind };
+    const latencyMs = Math.max(0, Math.round((globalThis.performance?.now?.() ?? Date.now()) - startedAt));
+    return { status: "unavailable", endpoint: baseUrl, latencyMs, detail: providerError.message, errorKind: providerError.kind };
   }
 }
 
 export function localCorsGuidance(provider: LocalProviderId) {
   if (provider === "ollama") return "The browser could not reach Ollama. Confirm `ollama serve` is running and allow this app origin through Ollama's OLLAMA_ORIGINS setting before restarting Ollama.";
   return "The browser could not reach LM Studio. Confirm the local server is started, then add this app origin to the server's CORS allowed origins in LM Studio before retrying.";
+}
+
+export function localCorsSetupGuide(provider: LocalProviderId, origin: string): LocalCorsSetupGuide {
+  if (provider === "ollama") {
+    return {
+      title: "Ollama browser access",
+      steps: ["Keep Ollama bound to localhost.", `Allow only ${origin} through OLLAMA_ORIGINS.`, "Restart Ollama, then check this server again."],
+      command: `OLLAMA_ORIGINS="${origin}" ollama serve`,
+      note: "On desktop installations, set OLLAMA_ORIGINS as an environment variable and restart the Ollama app. Avoid wildcard origins.",
+      docsUrl: "https://docs.ollama.com/faq#how-can-i-allow-additional-web-origins-to-access-ollama",
+    };
+  }
+  return {
+    title: "LM Studio browser access",
+    steps: ["Start the Local Server from the Developer tab.", "Enable CORS in Server Settings, or start the CLI server with the command below.", "Keep network serving off unless you deliberately need it."],
+    command: "lms server start --cors",
+    note: "CORS permits browser access. Keep the server on 127.0.0.1 and enable authentication if you ever expose it beyond localhost.",
+    docsUrl: "https://lmstudio.ai/docs/cli/serve/server-start",
+  };
 }
 
 export function formatProviderError(error: unknown) {
