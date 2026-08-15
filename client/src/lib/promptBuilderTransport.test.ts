@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { assertLocalEndpoint, localCorsGuidance, localCorsSetupGuide, normalizeLocalCompletion, probeLocalServer, ProviderError } from "./promptBuilderTransport";
+import { assertLocalEndpoint, localCorsGuidance, localCorsSetupGuide, localRecoveryActions, normalizeLocalCompletion, probeLocalServer, ProviderError } from "./promptBuilderTransport";
 
 describe("local provider endpoint policy", () => {
   it("accepts an explicitly local OpenAI-compatible endpoint", () => {
@@ -78,5 +78,20 @@ describe("local completion response normalization", () => {
       expect((error as Error).message).toContain("Local server error [model_not_loaded]: model qwen3:8b is not loaded");
       expect((error as Error).message).toContain("selected model is loaded");
     }
+  });
+});
+
+describe("local recovery actions", () => {
+  it("offers provider-safe reload guidance when a model is unloaded", () => {
+    expect(localRecoveryActions("ollama", new ProviderError("provider", "Local server error [model_not_loaded]: model qwen is not loaded"))).toMatchObject([
+      { id: "show-reload-steps", label: "SHOW RELOAD STEPS" },
+      { id: "discover-models" },
+    ]);
+  });
+
+  it("maps common model, CORS, and network failures to tailored actions", () => {
+    expect(localRecoveryActions("lmstudio", new ProviderError("provider", "Local server error [model_not_found]: unknown model"))[0]?.id).toBe("discover-models");
+    expect(localRecoveryActions("ollama", new ProviderError("network", "Could not reach the local model. Check CORS."))[0]?.id).toBe("open-cors-guide");
+    expect(localRecoveryActions("lmstudio", new ProviderError("provider", "unauthorized local API request"))[0]?.id).toBe("review-auth");
   });
 });

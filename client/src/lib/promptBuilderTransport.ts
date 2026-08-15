@@ -48,6 +48,12 @@ export type LocalCorsSetupGuide = {
   docsUrl: string;
 };
 
+export type LocalRecoveryAction = {
+  id: "show-reload-steps" | "discover-models" | "reapply-preset" | "open-cors-guide" | "check-server" | "review-auth";
+  label: string;
+  detail: string;
+};
+
 function normalizeLocalInput(value: string) {
   const trimmed = value.trim();
   if (!trimmed) return trimmed;
@@ -277,6 +283,36 @@ export async function probeLocalServer(provider: LocalProviderId, cfg: LocalProv
 export function localCorsGuidance(provider: LocalProviderId) {
   if (provider === "ollama") return "The browser could not reach Ollama. Confirm `ollama serve` is running and allow this app origin through Ollama's OLLAMA_ORIGINS setting before restarting Ollama.";
   return "The browser could not reach LM Studio. Confirm the local server is started, then add this app origin to the server's CORS allowed origins in LM Studio before retrying.";
+}
+
+export function localRecoveryActions(provider: LocalProviderId, error: unknown): LocalRecoveryAction[] {
+  const message = formatProviderError(error).toLowerCase();
+  const providerLabel = provider === "ollama" ? "Ollama" : "LM Studio";
+  const isUnloaded = /model_not_loaded|no model (?:is )?loaded|model .*not loaded|not loaded in memory/.test(message);
+  if (isUnloaded) return [
+    { id: "show-reload-steps", label: "SHOW RELOAD STEPS", detail: `Load the selected model into ${providerLabel}, then check the server again.` },
+    { id: "discover-models", label: "DISCOVER MODELS", detail: "Refresh the local model list after loading the model." },
+  ];
+  if (/model_not_found|unknown model|model .*not found|does not exist/.test(message)) return [
+    { id: "discover-models", label: "DISCOVER MODELS", detail: "Refresh the local list and select an available model identifier." },
+    { id: "reapply-preset", label: "REAPPLY PRESET", detail: `Restore the standard ${providerLabel} endpoint without changing the loopback-only policy.` },
+  ];
+  if (/cors|origin .*not allowed|cross.origin/.test(message)) return [
+    { id: "open-cors-guide", label: "OPEN CORS GUIDE", detail: `Review the scoped ${providerLabel} browser-access steps.` },
+    { id: "check-server", label: "CHECK LOCAL SERVER", detail: "Retry the non-generative health check after updating CORS." },
+  ];
+  if (/unauthorized|forbidden|api key|authentication/.test(message)) return [
+    { id: "review-auth", label: "REVIEW LOCAL AUTH", detail: "Verify any local-server access token requirement without storing a credential in this app." },
+    { id: "check-server", label: "CHECK LOCAL SERVER", detail: "Confirm the selected local endpoint remains reachable." },
+  ];
+  if (/network|failed to fetch|timeout|could not reach|connection refused/.test(message)) return [
+    { id: "check-server", label: "CHECK LOCAL SERVER", detail: `Confirm ${providerLabel} is running at the configured loopback endpoint.` },
+    { id: "open-cors-guide", label: "OPEN CORS GUIDE", detail: "Review browser access settings if the server is running but requests fail." },
+  ];
+  return [
+    { id: "check-server", label: "CHECK LOCAL SERVER", detail: "Refresh local availability before retrying the stage." },
+    { id: "discover-models", label: "DISCOVER MODELS", detail: "Refresh the model list and verify the selected identifier." },
+  ];
 }
 
 export function localCorsSetupGuide(provider: LocalProviderId, origin: string): LocalCorsSetupGuide {
